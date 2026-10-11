@@ -5,6 +5,7 @@ import { Download } from "lucide-react";
 
 import { PLATFORM_MARKS } from "@/components/platform-marks";
 import { Button } from "@/components/ui/button";
+import { redditDownloadEvent } from "@/lib/analytics";
 import {
   archFromUserAgent,
   defaultTarget,
@@ -14,6 +15,7 @@ import {
   type DownloadArch,
   type DownloadPlatform,
 } from "@/lib/downloads";
+import { trackRedditDownload } from "@/lib/reddit-pixel";
 import { downloadUrl } from "@/lib/shared";
 import { cn } from "@/lib/utils";
 
@@ -112,7 +114,11 @@ export function DownloadButton({ className, variant = "cta" }: DownloadButtonPro
       asChild
       className={cn("pill-cta gap-2", variant === "nav" && "max-sm:size-11 max-sm:p-0", className)}
     >
-      <a href={href} aria-label={ariaLabel}>
+      <a
+        href={href}
+        aria-label={ariaLabel}
+        onClick={() => trackRedditDownload(redditDownloadEvent)}
+      >
         <Mark className="size-4" />
         {variant === "nav" ? <span className="max-sm:hidden">Download</span> : text}
       </a>

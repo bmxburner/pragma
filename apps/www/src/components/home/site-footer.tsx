@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { ConsentSettingsLink } from "@/components/analytics/consent-settings-link";
 import { privacyRoute } from "@/lib/legal";
 import { supportRoute } from "@/lib/support";
 import {
@@ -86,7 +87,10 @@ export function SiteFooter() {
         <span>
           © {new Date().getFullYear()} {appName}. Built with agents, in public.
         </span>
-        <span>macOS · Linux · Windows · iOS · Android · Web</span>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <ConsentSettingsLink className="hover:text-foreground transition-colors" />
+          <span>macOS · Linux · Windows · iOS · Android · Web</span>
+        </div>
       </div>
     </footer>
   );

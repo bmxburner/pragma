@@ -2,6 +2,9 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono, Inter } from "next/font/google";
 import { RootProvider } from "fumadocs-ui/provider/next";
 
+import { ConsentBanner } from "@/components/analytics/consent-banner";
+import { ConsentProvider } from "@/components/analytics/consent-provider";
+import { SiteAnalytics } from "@/components/analytics/site-analytics";
 import { appDescription, appName, blogFeedRoute, siteUrl } from "@/lib/shared";
 
 import "./global.css";
@@ -49,7 +52,13 @@ export default function Layout({ children }: LayoutProps<"/">) {
       suppressHydrationWarning
     >
       <body className="flex min-h-screen flex-col">
-        <RootProvider>{children}</RootProvider>
+        <RootProvider>
+          <ConsentProvider>
+            {children}
+            <ConsentBanner />
+            <SiteAnalytics />
+          </ConsentProvider>
+        </RootProvider>
       </body>
     </html>
   );
