@@ -570,10 +570,21 @@ Rules that hold for any form we add later:
 - **Success replaces the form.** A submitted form is not re-rendered with a banner above
   it; the panel becomes a confirmation with a plain way back to a second request.
 
+### Consent banner
+
+**`consent-banner`** — the site's only overlay. A bottom-centred card on `{colors.surface-1}`
+with the standard hairline and `{rounded.xl}` corners on the floating shadow, carrying one
+`{typography.body-sm}` line in `{colors.ink-muted}` (the privacy link in `{colors.ink}`) and
+exactly two pills: `button-secondary` (Decline) and `button-primary` (Accept). The area around
+the card is click-through, it appears while a consent-required visitor has not chosen (or when
+re-opened from the footer's **Cookie settings** control), and it is what gates the Reddit Pixel
+and Vercel Web Analytics. No third action, no gradient, no dismiss icon.
+
 ### Footer
 
 **`footer`** — Link grid on `{colors.canvas}` with the wordmark and a closing line left,
-and columns of caption-sized links right. Text `{colors.ink-muted}`, padding 64px 32px.
+and columns of caption-sized links right. Text `{colors.ink-muted}`, padding 64px 32px. The
+bottom bar carries a **Cookie settings** control beside the platform list.
 
 ## Do's and Don'ts
 
