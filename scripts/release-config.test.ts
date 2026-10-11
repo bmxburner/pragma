@@ -52,6 +52,10 @@ function extraFiles(): Array<{ component: string; file: ExtraFile }> {
   );
 }
 
+function majorOf(version: string): number {
+  return Number(version.split(".")[0]);
+}
+
 describe("Release Please cannot rewrite the mobile runtime version", () => {
   // `runtimeVersion.policy` is `fingerprint` and `expo.version` is hashed into the
   // resolved `expoConfig`, so a release that rewrites it changes the runtime version
@@ -60,8 +64,10 @@ describe("Release Please cannot rewrite the mobile runtime version", () => {
     expect(extraFiles().filter(({ file }) => file.path.endsWith("app.json"))).toEqual([]);
   });
 
+  // Not pinned to an exact version: `pragma-go-store-release.yml` bumps it straight
+  // to `main`, and a pin here would turn every store release into a red build.
   test("the store version is never behind the desktop major", () => {
-    expect(goApp.expo.version).toBe("1.3.0");
+    expect(majorOf(goApp.expo.version)).toBeGreaterThanOrEqual(majorOf(manifest["apps/pragma"]));
   });
 
   // `node-workspace` releases every `node` package whose workspace dependency moved, so

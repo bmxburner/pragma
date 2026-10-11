@@ -741,15 +741,21 @@ eas submit --platform ios --latest
   `android.versionCode` and `autoIncrement` on the production profile bumps them
   server-side; `app.json`'s `version` (the marketing version) stays the source of
   truth for the store listing. Do not hand-bump the build number.
-- **The marketing version is bumped by hand, and only for an App Store release.** A
-  `pragma-go-v*` tag numbers the release (`version.txt`), not the binary, so CI can
-  upload a new build to TestFlight that still carries the old marketing version.
-  App Store Connect's build picker for a version lists only builds whose version
-  string matches it, so such a build can never be attached to a new App Store version. To ship
-  one to the store, bump `expo.version` in a `fix(pragma-go):` commit (a `chore:`
-  cuts no release), merge the release PR, then create the matching version in App
-  Store Connect and attach the build. The bump changes the fingerprint, so that
-  release is always a new binary.
+- **The marketing version moves only through the _Pragma Go store release_ workflow.**
+  A `pragma-go-v*` tag numbers the release (`version.txt`), not the binary, so a
+  release can upload a TestFlight build that still carries the old marketing
+  version — and App Store Connect's build picker for a version lists only builds
+  whose version string matches it, so that build can never reach the App Store.
+  To ship to the store, run `.github/workflows/pragma-go-store-release.yml`
+  (Actions → _Pragma Go store release_ → _Run workflow_ on `main`, or
+  `gh workflow run pragma-go-store-release.yml -f version=1.4.0`). It bumps
+  `expo.version` through `scripts/pragma-go-store-version.ts` (which refuses a
+  version that is not higher), pushes a `chore(pragma-go):` commit to `main`, then
+  builds that commit and submits it to TestFlight. The commit is a `chore` so it
+  cuts no release: the next `pragma-go-v*` release finds the build by fingerprint
+  and ships as an update to it. Android gets its new APK from that next release.
+  What is left by hand is App Store Connect: create the version, select the build,
+  submit for review.
 - **Release Please must never write `app.json`, and `apps/pragma-go` deliberately has
   no `extra-files` entry in `release-please-config.json`.** `expo.version` is inside the
   hashed `expoConfig`, so rewriting it changes the fingerprint — and therefore the
