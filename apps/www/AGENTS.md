@@ -50,6 +50,7 @@ apps/www/
     │   ├── docs/            # DocsLayout + the [[...slug]] page
     │   ├── api/search/      # Fumadocs search endpoint (Orama, built from the source)
     │   ├── api/updates/     # Desktop auto-update check (`GET /api/updates`; no `@pragma-sh/*`)
+    │   ├── api/geo/         # Consent region (`GET /api/geo`; reads `x-vercel-ip-country`)
     │   ├── download/[target]/ # redirects to the latest release's installer for one platform
     │   ├── llms.txt/, llms-full.txt/, llms.mdx/  # machine-readable docs output
     │   ├── og/docs/         # per-page OG images
@@ -67,6 +68,7 @@ apps/www/
     │   ├── plugin-card.tsx  # gallery preview cell — stretched link to the detail page
     │   ├── blog-tags.tsx    # a post's frontmatter tags as pills (index + article)
     │   ├── support/         # the support request form (client) posting to the route's action
+    │   ├── analytics/       # region-scoped consent: provider, banner, settings link, pixel + Vercel loaders
     │   ├── deep-link-forward.tsx  # one pragma:// hand-off page (auto-redirect + fallback pills)
     │   └── home/            # landing page sections
     │       ├── agents.ts            # the shipped agent integrations (id, name, mark, tint)
@@ -80,6 +82,8 @@ apps/www/
     └── lib/
         ├── css-color.ts     # resolves a CSS token to hex so three.js can use the palette
         ├── legal.ts         # privacy route + last-updated date — the URL App Store Connect is given
+        ├── analytics.ts     # pixel id, event names, storage key, and the consent-region rule
+        ├── reddit-pixel.ts  # Reddit Pixel loader + event tracking (client-only, post-consent)
         ├── support.ts       # support route, address, reply window, topics + the pure request validator
         ├── support-rate-limit.ts # per-connection submission cap the support action checks first
         ├── shared.ts        # app name, routes, GitHub repo, site URL — single source of truth
@@ -402,6 +406,18 @@ apps/www/
   `/support` is its sibling artifact and follows the same rules; unlike the policy it
   _is_ linked from the footer, because App Review expects the support route to be
   reachable by a user who never saw the listing.
+- **Analytics are region-scoped, and their facts live in `src/lib/analytics.ts`.** The site
+  loads the Reddit Pixel — which measures ad-click → download with a `Download` custom
+  conversion fired from `DownloadButton` — and Vercel Web Analytics. `GET /api/geo` reads
+  Vercel's `x-vercel-ip-country` and answers whether the visitor's region requires prior
+  consent (`requiresConsent`: the EEA, the UK, Switzerland, and any unknown location). In a
+  consent-required region neither tool loads until the banner in `src/components/analytics/`
+  is accepted; elsewhere they load by default, with a **Cookie settings** control in the footer
+  to turn them off. The explicit choice is stored under `pragma.analytics-consent`. Because
+  both are processors, `/privacy` names Reddit and Vercel and describes the region behaviour —
+  update that page (and `privacyLastUpdated`) whenever the tracking changes. The pixel id is
+  public and stays a constant, never an environment variable. Adding a new analytics surface
+  means a new event constant here, not an inline string at the call site.
 - **Docs content mirrors the product's six audiences.** `content/docs/` holds
   `user-guide/`, `sdk/`, `cli/`, `automations/`, `plugins/`, and `wiki/` — each with its
   own `meta.json` and an `index.mdx` landing page. A new page joins its folder's

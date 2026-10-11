@@ -32,12 +32,17 @@ export default function PrivacyPage() {
         with. Your projects, your code, and your agent conversations stay on machines you control.
       </p>
       <p>
-        <strong>As of the date above, we operate no service that receives your data</strong> &mdash;
-        there is no analytics SDK, no crash reporter, no advertising identifier, and no tracking in
-        either app. The sections below describe both what happens today and what would apply if that
-        changes, so you can see the rules we hold ourselves to either way. We do not sell or rent
-        personal information, we do not share it with data brokers, and we do not build advertising
-        profiles &mdash; and those three commitments are not conditional on anything below.
+        <strong>As of the date above, neither app sends us your data</strong> &mdash; there is no
+        analytics SDK, no crash reporter, and no advertising identifier in Pragma or Pragma Go, and
+        your projects, code, and conversations stay on machines you control. This marketing and
+        documentation site is the one exception: it uses analytics &mdash; loaded only with your
+        consent where the law requires it, and on by default elsewhere &mdash; to measure Reddit ads
+        and site traffic; the Reddit Pixel sets cookies, while Vercel Web Analytics is cookieless,
+        as described under <em>Analytics and diagnostics</em> below. The sections below describe
+        both what happens today and what would apply if that changes, so you can see the rules we
+        hold ourselves to either way. We do not sell or rent personal information, we do not share
+        it with data brokers, and we do not build advertising profiles &mdash; and those three
+        commitments are not conditional on anything below.
       </p>
 
       <h2>What Pragma (desktop) stores</h2>
@@ -94,30 +99,56 @@ export default function PrivacyPage() {
 
       <h2>Analytics and diagnostics</h2>
       <p>
-        Neither app currently collects analytics, usage statistics, or crash reports. If we
-        introduce them, they will be limited to product and stability data &mdash; which features
-        are used, performance measurements, error and crash diagnostics, and coarse environment
-        details such as app version, operating system version, and device model.
+        <strong>The apps.</strong> Neither app currently collects analytics, usage statistics, or
+        crash reports. If we introduce them, they will be limited to product and stability data
+        &mdash; which features are used, performance measurements, error and crash diagnostics, and
+        coarse environment details such as app version, operating system version, and device model.
       </p>
       <p>
-        Whatever form they take, these rules apply: diagnostics will never include the contents of
+        <strong>This website.</strong> The marketing and documentation site uses two third-party
+        analytics tools:
+      </p>
+      <ul>
+        <li>
+          <strong>Reddit Pixel</strong>, which measures whether a visit that came from a Reddit ad
+          led to a download. It sets cookies and shares your IP address, user agent, and the pages
+          you view with Reddit, so we can report cost per download. See Reddit&rsquo;s{" "}
+          <a href="https://www.reddit.com/policies/privacy-policy">privacy policy</a>.
+        </li>
+        <li>
+          <strong>Vercel Web Analytics</strong>, from the service that hosts this site, which
+          records aggregate, cookieless page views (page, referrer, and coarse location). See
+          Vercel&rsquo;s <a href="https://vercel.com/legal/privacy-policy">privacy policy</a>.
+        </li>
+      </ul>
+      <p>
+        <strong>Where prior consent is required</strong> &mdash; the European Economic Area, the
+        United Kingdom, Switzerland, and any visitor whose location we cannot determine &mdash;
+        neither tool loads until you choose <em>Accept</em> on the cookie banner. Elsewhere, for
+        example in the United States, they load by default, and you can turn them off at any time
+        with <em>Cookie settings</em> in the footer. Declining records only that choice in your
+        browser&rsquo;s local storage and sets no analytics cookie; clearing this site&rsquo;s
+        stored data resets the choice.
+      </p>
+      <p>
+        Whatever form they take, these rules apply: analytics will never include the contents of
         your code, your prompts, your agent conversations, your file paths, your repository names,
-        or your credentials. They will not be used for advertising or sold to anyone. Collection
-        will be disclosed on this page before it begins, with the date above updated, and the change
-        will be visible in the repository&rsquo;s public history.
+        or your credentials. They will not be sold to anyone. Collection will be disclosed on this
+        page before it begins, with the date above updated, and the change will be visible in the
+        repository&rsquo;s public history.
       </p>
 
       <h2>Services we may operate</h2>
       <p>
         Pragma has no accounts, and the only server running Pragma itself is the one on your own
-        computer. The one exception today is this website&rsquo;s support form: submitting it sends
-        your name, email address, and message to <strong>Splitforms</strong>, a form-processing
-        service, which emails the request to us. Splitforms is bound to use that data only to
-        deliver the submission; see its own{" "}
-        <a href="https://splitforms.com/legal/privacy-policy">privacy policy</a>. We may later offer
-        further optional hosted services &mdash; for example an account, a relay that reaches your
-        desktop without you configuring a tunnel, sync between your devices, or a licensing and
-        payment system.
+        computer. This website uses a small number of processors: the support form sends your name,
+        email address, and message to <strong>Splitforms</strong>, a form-processing service, which
+        emails the request to us &mdash; bound to use that data only to deliver the submission, see
+        its own <a href="https://splitforms.com/legal/privacy-policy">privacy policy</a> &mdash;
+        and, while the analytics described above are active, <strong>Reddit</strong> and{" "}
+        <strong>Vercel</strong> receive that data. We may later offer further optional hosted
+        services &mdash; for example an account, a relay that reaches your desktop without you
+        configuring a tunnel, sync between your devices, or a licensing and payment system.
       </p>
       <p>
         If we do, this page will describe each service before it launches: what it receives, how
@@ -172,6 +203,15 @@ export default function PrivacyPage() {
           <strong>Splitforms</strong>, which receives your name, email address, and message when you
           submit the <a href={supportRoute}>support form</a>, so it can deliver your request to us.
         </li>
+        <li>
+          <strong>Reddit</strong>, which receives pixel data &mdash; cookies, IP address, user
+          agent, and the pages you view &mdash; while analytics are active, to measure how Reddit
+          ads lead to downloads.
+        </li>
+        <li>
+          <strong>Vercel</strong>, which hosts this website and, while analytics are active, records
+          the aggregate page analytics described above.
+        </li>
       </ul>
       <p>
         Any processor we engage for a service of our own will be named on this page, and will be
@@ -193,8 +233,10 @@ export default function PrivacyPage() {
       </p>
       <p>
         Should we later hold data about you, you may ask us what we hold, ask for a copy, ask us to
-        correct or delete it, and object to a particular use &mdash; and analytics, if introduced,
-        will be something you can turn off.
+        correct or delete it, and object to a particular use. In regions that require prior consent,
+        the website analytics described above are opt-in; elsewhere they are on by default. Either
+        way you can turn them off with <em>Cookie settings</em> in the footer, or withdraw entirely
+        by clearing this site&rsquo;s stored data.
       </p>
 
       <h2>Changes</h2>
