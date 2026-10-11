@@ -739,8 +739,17 @@ eas submit --platform ios --latest
   that builds through some other task is not.
 - **`appVersionSource` is `remote`**, so EAS owns `ios.buildNumber` /
   `android.versionCode` and `autoIncrement` on the production profile bumps them
-  server-side; `app.json`'s `version` (the marketing version, `1.1.0`) stays the
-  source of truth for the store listing. Do not hand-bump the build number.
+  server-side; `app.json`'s `version` (the marketing version) stays the source of
+  truth for the store listing. Do not hand-bump the build number.
+- **The marketing version is bumped by hand, and only for an App Store release.** A
+  `pragma-go-v*` tag numbers the release (`version.txt`), not the binary, so CI can
+  upload a new build to TestFlight that still carries the old marketing version.
+  App Store Connect's build picker for a version lists only builds whose version
+  string matches it, so such a build can never be attached to a new App Store version. To ship
+  one to the store, bump `expo.version` in a `fix(pragma-go):` commit (a `chore:`
+  cuts no release), merge the release PR, then create the matching version in App
+  Store Connect and attach the build. The bump changes the fingerprint, so that
+  release is always a new binary.
 - **Release Please must never write `app.json`, and `apps/pragma-go` deliberately has
   no `extra-files` entry in `release-please-config.json`.** `expo.version` is inside the
   hashed `expoConfig`, so rewriting it changes the fingerprint — and therefore the
