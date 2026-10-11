@@ -1,0 +1,86 @@
+# Ships a Pragma Go binary under a new App Store marketing version, on demand.
+#
+# Release Please never writes `expo.version` (it would change the fingerprint
+# and cut shipped builds off from OTA updates — see `release-config.test.ts`),
+# so an ordinary `pragma-go-v*` release can put a build in TestFlight that still
+# carries the previous marketing version. App Store Connect only lets a version
+# select builds whose version string matches it, so that build can never reach
+# the App Store. This workflow is the missing step: it bumps `expo.version`,
+# pushes the bump to `main`, then builds that commit and submits it.
+#
+# The bump is a `chore:` commit on purpose. It cuts no Pragma Go release, and it
+# does not need one: the binary is built here. The next release finds this
+# build by its fingerprint and ships as an over-the-air update to it.
+name: Pragma Go store release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: New App Store version (major.minor.patch), higher than the current one
+        required: true
+        type: string
+
+concurrency:
+  group: pragma-go-store-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  store-release:
+    # The bump is pushed to `main`, so only a run dispatched from `main` may do it.
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      # Same reason as `release.yml`: the locally-resolved app config must
+      # fingerprint identically to the worker's, or OTA updates never reach it.
+      PRAGMA_STORE_BUILD: "1"
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A push made with `GITHUB_TOKEN` triggers no workflows, so CI would
+          # never run on the bump. Fall back to it only when the PAT is unset.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        env:
+          HUSKY: "0"
+        run: bun install --frozen-lockfile
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+      - name: Bump the store version
+        run: bun scripts/pragma-go-store-version.ts "$VERSION"
+      # Pushed before building, so the binary is always built from a commit on
+      # `main`. A push rejected because `main` moved fails here, before any EAS
+      # time is spent; re-run the workflow.
+      - name: Commit and push the bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore(pragma-go): bump the store version to $VERSION"
+          git push origin HEAD:main
+      - name: Build on EAS and submit to TestFlight
+        working-directory: apps/pragma-go
+        run: |
+          eas build --platform ios --profile production --non-interactive --wait --json > "$RUNNER_TEMP/build.json"
+          id="$(jq -r '.[0].id' "$RUNNER_TEMP/build.json")"
+          number="$(jq -r '.[0].appBuildVersion' "$RUNNER_TEMP/build.json")"
+          test -n "$id" && test "$id" != null
+          eas submit --platform ios --profile production --id "$id" --non-interactive
+          {
+            echo "### Pragma Go $VERSION ($number) submitted to TestFlight"
+            echo
+            echo "Once Apple finishes processing it, create version **$VERSION** in App Store Connect,"
+            echo "select build **$number**, and submit it for review."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -630,7 +630,9 @@ no hand-written code to audit and no author to advise. The **Pragma Go ship plan
 (`.github/workflows/pragma-go-ship-plan.yml`) is the other GitHub-writing check and the
 mirror image: it runs _only_ on a release PR that bumps `apps/pragma-go/version.txt`, and
 keeps a sticky comment saying whether each platform will ship as an OTA update or a new
-binary (see _Releases: update or new binary_ in `apps/pragma-go/AGENTS.md`).
+binary (see _Releases: update or new binary_ in `apps/pragma-go/AGENTS.md`). A new
+App Store marketing version is the one Pragma Go step Release Please cannot take, so it
+is a manually dispatched workflow, `.github/workflows/pragma-go-store-release.yml`.
 
 **CI clones and fetches with no token — `pragma-sh/pragma` is public.** RWX's
 `${{ github.token }}` context is not to be relied on: it can vanish mid-run with

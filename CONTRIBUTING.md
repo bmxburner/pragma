@@ -440,10 +440,18 @@ fails rather than prompting when one is missing. Set them up once with
   `eas.json` only identify the app. They are not a credential.
 
 EAS numbers the build itself (`autoIncrement`), but the marketing version is
-`expo.version` in `app.json`. Once a version is approved on the App Store, Apple rejects
-further uploads under it, so bump `expo.version` by hand before the next release after
-that. See _App Store / Play Store builds_ in `apps/pragma-go/AGENTS.md` for why Release
-Please must not.
+`expo.version` in `app.json`, and App Store Connect only lets a version select builds
+whose version string matches it. Release Please must not write it (see _App Store / Play
+Store builds_ in `apps/pragma-go/AGENTS.md`), so a new App Store version goes through the
+**Pragma Go store release** workflow instead:
+
+```bash
+gh workflow run pragma-go-store-release.yml --repo pragma-sh/pragma -f version=1.4.0
+```
+
+It bumps `expo.version`, pushes the bump to `main`, and builds and submits that commit.
+Then create the version in App Store Connect, select the build, and submit it for review.
+It needs `EXPO_TOKEN` and, so that CI runs on the pushed bump, `RELEASE_PLEASE_TOKEN`.
 
 ### npm
 
