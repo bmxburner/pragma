@@ -4,9 +4,16 @@
  * reader (`pragma-ai`, `pragma-automations`, `pragma-plugins`) so the
  * buffer-scan logic isn't hand-copied per package.
  *
- * `onEnd` runs exactly once when the supervising process closes stdin. A
+ * `onEnd` runs exactly once when the supervising process closes stdin, or when
+ * writing to stdout fails because the supervisor stopped reading it. A
  * long-lived sidecar must use it to release its own timers/listeners and exit:
- * parent death closes the pipe even when the parent cannot run Rust cleanup.
+ * parent death closes the pipes even when the parent cannot run Rust cleanup.
+ *
+ * The stdout half matters as much as the stdin half. Without a listener, a
+ * write to a broken stdout raises `EPIPE` as an uncaught exception; every
+ * sidecar reports uncaught exceptions by writing them to stdout, which raises
+ * `EPIPE` again. That loop pins a core, starves the event loop so the stdin
+ * `end` never arrives, and leaves the orphan running after the server is gone.
  */
 export function readStdinLines(onLine: (line: string) => void, onEnd?: () => void): void {
   let buffer = "";
@@ -29,6 +36,9 @@ export function readStdinLines(onLine: (line: string) => void, onEnd?: () => voi
   });
   process.stdin.once("end", finish);
   process.stdin.once("close", finish);
+  // `on`, not `once`: writes already queued fail one after another, and any
+  // that found no listener would re-enter the uncaught-exception loop.
+  process.stdout.on("error", finish);
 }
 
 /**

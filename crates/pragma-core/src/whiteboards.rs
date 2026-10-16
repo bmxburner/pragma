@@ -5,8 +5,6 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use chrono::Utc;
-use excalidraw_image::argv::Args as RenderArgs;
-use excalidraw_image::engine::Engine;
 use excalidraw_image::raster::{svg_to_png, RasterOptions};
 use pragma_constants::{ExcalidrawScene, Whiteboard, WhiteboardViewResult, CONSTANTS};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -14,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::{CoreError, CoreResult};
+use crate::{whiteboard_render, CoreError, CoreResult};
 
 /// One whiteboard operation served by the host owning its worktree.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -295,21 +293,11 @@ impl WhiteboardStore {
         let board = self.get(worktree_id, id)?;
         let scene = serde_json::to_string(&board.scene)
             .map_err(|error| CoreError::Operation(error.to_string()))?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .map_err(|error| CoreError::Operation(error.to_string()))?;
-        let mut engine = Engine::new();
-        let render_args = RenderArgs {
-            dark,
-            ..RenderArgs::default()
-        };
-        let rendered = runtime
-            .block_on(engine.render(&scene, &render_args.opts_json(false)))
-            .map_err(|error| CoreError::Operation(format!("render whiteboard: {error}")))?;
+        let svg = whiteboard_render::render_svg(scene, dark)?;
         let max = u32::try_from(CONSTANTS.whiteboards.max_render_dimension.get())
             .map_err(|error| CoreError::Operation(error.to_string()))?;
         let png = svg_to_png(
-            &rendered.svg,
+            &svg,
             &RasterOptions {
                 scale: None,
                 max: Some(max),

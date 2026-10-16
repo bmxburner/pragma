@@ -95,6 +95,14 @@ Tauri or client presentation code.
   anything under `constants.storage.protectedFolders` (`.git`, `.pragma`), then removes.
   Palette search and storage scans share `cancel::CancelRegistry` for cancel-by-id.
 
+- **Whiteboard renders go through the one shared engine (`whiteboard_render.rs`).** Never
+  build an `excalidraw_image::Engine` per request: each one recompiles the bundled Excalidraw
+  core and is its own V8 isolate, and parallel requests on the server's per-connection threads
+  exhausted V8's code-range reservation and aborted `pragma-server`
+  (`Failed to reserve virtual memory for CodeRange`). `render_svg` queues to a single worker
+  thread that reuses its engine and rebuilds it only after a failed render. Do not use
+  `Engine::new_cached` either — on a cache miss it re-executes the current binary, which here is
+  `pragma-server`, to bake a snapshot.
 - **A field added to an RPC response must be optional on the wire.** The client talks to
   whatever server is already running — a detached dev server from an earlier build, or
   an SSH host on an older release — and `daemon.protocolVersion` only moves on a release,

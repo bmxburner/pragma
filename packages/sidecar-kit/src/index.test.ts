@@ -49,6 +49,38 @@ describe("readStdinLines", () => {
       Object.defineProperty(process, "stdin", { value: originalStdin, configurable: true });
     }
   });
+
+  it("notifies the sidecar when its supervisor stops reading stdout", async () => {
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const originalStdin = process.stdin;
+    const originalStdout = process.stdout;
+    Object.defineProperty(process, "stdin", { value: stdin, configurable: true });
+    Object.defineProperty(process, "stdout", { value: stdout, configurable: true });
+    try {
+      let ends = 0;
+      const ended = new Promise<void>((resolve) => {
+        readStdinLines(
+          () => undefined,
+          () => {
+            ends += 1;
+            resolve();
+          },
+        );
+      });
+
+      const epipe = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+      stdout.emit("error", epipe);
+      stdout.emit("error", epipe);
+      await ended;
+      stdin.end();
+
+      expect(ends).toBe(1);
+    } finally {
+      Object.defineProperty(process, "stdin", { value: originalStdin, configurable: true });
+      Object.defineProperty(process, "stdout", { value: originalStdout, configurable: true });
+    }
+  });
 });
 
 describe("freshImportSpecifier", () => {

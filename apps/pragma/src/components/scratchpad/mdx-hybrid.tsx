@@ -68,6 +68,14 @@ const MDX_NODE_TYPES = new Set([
 const RECURSIVE_MARKDOWN_TYPES = new Set(["blockquote", "list", "listItem"]);
 
 /**
+ * HTML tags whose children are not markdown: foreign content (SVG, MathML),
+ * literal text, and form or script bodies. Splitting one into an editable
+ * container would run `<rect>`/`<text>` children through markdown and break
+ * both the document and the rendering, so each stays one live-preview atom.
+ */
+const OPAQUE_HTML_TAGS = new Set(["svg", "math", "pre", "code", "script", "style", "textarea"]);
+
+/**
  * Replaces MDX regions with TipTap-friendly markup, at every depth. A region
  * holding expressions or inline JSX becomes a lossless `<pragma-mdx-block>`
  * atom; a JSX element wrapping editable content becomes a
@@ -165,7 +173,10 @@ function nodeHtml(source: string, node: PositionedNode, context: string): string
   const end = node.position?.end.offset ?? source.length;
   const open = source.slice(start, region.start).trim();
   const close = source.slice(region.end, end).trim();
-  const content = markdownToHtml(rewriteChildren(source, node, context, region.start, region.end));
+  // Start at the first child's line so its indentation is measured too.
+  const lineStart = region.start - indentAt(source, region.start).length;
+  const children = rewriteChildren(source, node, context, lineStart, region.end);
+  const content = markdownToHtml(dedent(children));
   return containerHtml(open, close, content);
 }
 
@@ -173,13 +184,31 @@ function nodeHtml(source: string, node: PositionedNode, context: string): string
  * Whether a JSX flow element's children can be edited in place. Components
  * (capitalized or member expressions) must render as a whole, so they only
  * split when their children are pure markdown; a plain HTML tag renders nothing
- * of its own and always splits, with any MDX inside it becoming its own atom.
+ * of its own and splits, with any MDX inside it becoming its own atom — except
+ * the tags in `OPAQUE_HTML_TAGS`, whose children are not markdown.
  */
 function isEditableElement(element: PositionedNode): boolean {
   const inner = element.children ?? [];
   if (inner.length === 0) return false;
   if (isComponentName(element.name)) return !inner.some(containsMdx);
-  return true;
+  return !OPAQUE_HTML_TAGS.has(element.name ?? "");
+}
+
+/**
+ * Strips the indentation every non-blank line shares. MDX lets JSX children be
+ * indented to match their tags, but the plain-markdown pass that renders a
+ * container's children reads four leading spaces as a code block — which is
+ * how indented children used to surface as literal `<pragma-mdx-…>` markup.
+ */
+function dedent(text: string): string {
+  const lines = text.split("\n");
+  const indents = lines
+    .filter((line) => line.trim().length > 0)
+    .map((line) => /^[ \t]*/.exec(line)?.[0].length ?? 0);
+  const shared = indents.length > 0 ? Math.min(...indents) : 0;
+  return shared === 0
+    ? text
+    : lines.map((line) => line.slice(Math.min(shared, line.length))).join("\n");
 }
 
 /** True for a JSX name React resolves to a component rather than an HTML tag. */

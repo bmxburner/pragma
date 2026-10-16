@@ -276,6 +276,42 @@ Body text.
     expect(serialized).toContain("- [ ] Pending");
     editor.destroy();
   });
+
+  it("parses indented children of an HTML element as markdown, not a code block", () => {
+    const source = `<section>
+      **Indented** child
+
+      - one
+      - two
+</section>
+`;
+    const prepared = preprocessMdxForTiptap(source);
+    const contents = [...prepared.matchAll(/data-content="([^"]+)"/g)].map((match) =>
+      decodeURIComponent(match[1] ?? ""),
+    );
+    expect(contents).toHaveLength(1);
+    expect(contents[0]).toContain("<strong>Indented</strong>");
+    expect(contents[0]).toContain("<li>one</li>");
+    expect(contents[0]).not.toContain("<pre>");
+  });
+
+  it("keeps an SVG with expressions as one live atom instead of splitting it", () => {
+    const source = `<svg viewBox="0 0 100 40">
+  <defs>
+    <marker id="arrow" />
+  </defs>
+  {["a", "b"].map((label, index) => (
+    <text key={label} x={index * 40} y="20">{label}</text>
+  ))}
+</svg>
+`;
+    const prepared = preprocessMdxForTiptap(source);
+    expect(prepared).not.toContain("pragma-mdx-container");
+    const blocks = [...prepared.matchAll(/data-source="([^"]+)"/g)].map((match) =>
+      decodeURIComponent(match[1] ?? ""),
+    );
+    expect(blocks).toEqual([source.trimEnd()]);
+  });
 });
 
 /** Mounts the real React node views, which only render under `EditorContent`. */

@@ -7,6 +7,7 @@ import type { PromptAgentOptions, ScratchpadAgentProgress } from "./index";
 import type { ScratchpadWhiteboardSnapshot } from "./index";
 import { OTHER_VALUE, composeAnswer, toggleChoice } from "./question";
 import { Badge, Button, Card, Input, Progress, Textarea, type Tone } from "./primitives";
+import { WhiteboardRetryGate } from "./whiteboard-retry";
 
 const EMPTY_OPTIONS: readonly AskQuestionOption[] = [];
 
@@ -27,6 +28,7 @@ export function Whiteboard({ id, refreshIntervalMs = 3000 }: WhiteboardProps): R
   const darkRef = useRef<boolean | undefined>(undefined);
   const mountedRef = useRef(true);
   const inFlightRef = useRef(false);
+  const retryRef = useRef(new WhiteboardRetryGate(refreshIntervalMs));
   const openWhiteboard = globalThis.pragmaScratchpad?.openWhiteboard;
 
   const open = (): void => {
@@ -36,35 +38,42 @@ export function Whiteboard({ id, refreshIntervalMs = 3000 }: WhiteboardProps): R
     });
   };
 
-  // fallow-ignore-next-line complexity -- one bounded poll updates theme/version refs and the three request outcomes atomically.
-  const refresh = useCallback(async () => {
-    // One snapshot request at a time: a poll tick or a manual refresh landing
-    // while the host is still rendering would otherwise stack requests (and
-    // native PNG renders) instead of applying backpressure.
-    if (inFlightRef.current) return;
-    inFlightRef.current = true;
-    try {
-      const dark = document.documentElement.classList.contains("dark");
-      const knownVersion = darkRef.current === dark ? versionRef.current : undefined;
-      const next = await scratchpadBridge().getWhiteboardSnapshot(id, knownVersion, dark);
-      if (!mountedRef.current) return;
-      if (next) {
-        versionRef.current = next.version;
-        darkRef.current = dark;
-        setSnapshot(next);
+  const refresh = useCallback(
+    // fallow-ignore-next-line complexity -- one bounded poll updates theme/version refs and the three request outcomes atomically.
+    async (manual = false) => {
+      // One snapshot request at a time: a poll tick or a manual refresh landing
+      // while the host is still rendering would otherwise stack requests (and
+      // native PNG renders) instead of applying backpressure. A failing board
+      // also backs off, since it has no known version to skip a render with.
+      if (inFlightRef.current || !retryRef.current.allows(manual)) return;
+      inFlightRef.current = true;
+      try {
+        const dark = document.documentElement.classList.contains("dark");
+        const knownVersion = darkRef.current === dark ? versionRef.current : undefined;
+        const next = await scratchpadBridge().getWhiteboardSnapshot(id, knownVersion, dark);
+        if (!mountedRef.current) return;
+        if (next) {
+          versionRef.current = next.version;
+          darkRef.current = dark;
+          setSnapshot(next);
+        }
+        retryRef.current.succeeded();
+        setError(null);
+      } catch (cause) {
+        retryRef.current.failed();
+        if (mountedRef.current) setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        inFlightRef.current = false;
+        if (mountedRef.current) setLoading(false);
       }
-      setError(null);
-    } catch (cause) {
-      if (mountedRef.current) setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      inFlightRef.current = false;
-      if (mountedRef.current) setLoading(false);
-    }
-  }, [id]);
+    },
+    [id],
+  );
 
   useEffect(() => {
     mountedRef.current = true;
     inFlightRef.current = false;
+    retryRef.current = new WhiteboardRetryGate(refreshIntervalMs);
     versionRef.current = undefined;
     darkRef.current = undefined;
     setSnapshot(null);
@@ -94,7 +103,7 @@ export function Whiteboard({ id, refreshIntervalMs = 3000 }: WhiteboardProps): R
               Open
             </Button>
           ) : null}
-          <Button disabled={loading} onClick={() => void refresh()} size="sm" variant="ghost">
+          <Button disabled={loading} onClick={() => void refresh(true)} size="sm" variant="ghost">
             Refresh
           </Button>
         </div>
