@@ -6,7 +6,7 @@ would otherwise be copy-pasted per package.
 
 ## Responsibilities
 
-- `readStdinLines`: buffer `process.stdin` into trimmed, non-empty NDJSON lines and notify long-lived sidecars when their supervisor closes the pipe.
+- `readStdinLines`: buffer `process.stdin` into trimmed, non-empty NDJSON lines and notify long-lived sidecars when their supervisor closes stdin or stops reading stdout (a broken stdout would otherwise spin the orphan at 100% CPU through the uncaught-exception reporter).
 
 ## Rules
 
