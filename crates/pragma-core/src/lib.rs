@@ -29,6 +29,7 @@ pub mod storage;
 mod storage_tree;
 pub mod tabs;
 pub mod watcher;
+mod whiteboard_render;
 pub mod whiteboards;
 
 /// Result type for host-side core operations.
