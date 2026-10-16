@@ -77,7 +77,7 @@ fn worker(jobs: &Receiver<RenderJob>) {
         .opts_json(false);
         // Not `new_cached`: on a cache miss it re-executes the current binary
         // to bake a snapshot, and the current binary here is pragma-server.
-        let active = engine.get_or_insert_with(Engine::new);
+        let active = engine.get_or_insert_with(new_engine);
         let result = runtime.block_on(active.render(&job.scene, &options));
         let result = match result {
             Ok(rendered) => Ok(rendered.svg),
@@ -92,15 +92,25 @@ fn worker(jobs: &Receiver<RenderJob>) {
     }
 }
 
+fn new_engine() -> Engine {
+    #[cfg(test)]
+    tests::ENGINES_BUILT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Engine::new()
+}
+
 fn unavailable() -> CoreError {
     CoreError::Operation("whiteboard renderer is unavailable".to_string())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
 
     use super::render_svg;
+
+    /// Engines built by the shared worker, counted by `new_engine`.
+    pub(super) static ENGINES_BUILT: AtomicUsize = AtomicUsize::new(0);
 
     const EMPTY_SCENE: &str = r##"{"type":"excalidraw","version":2,"source":"pragma","elements":[],"appState":{"viewBackgroundColor":"#ffffff"},"files":{}}"##;
 
@@ -113,5 +123,10 @@ mod tests {
             let svg = render.join().expect("render thread").expect("render");
             assert!(svg.contains("<svg"), "expected an SVG document");
         }
+        assert_eq!(
+            ENGINES_BUILT.load(Ordering::SeqCst),
+            1,
+            "concurrent renders must reuse a single engine"
+        );
     }
 }
