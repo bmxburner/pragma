@@ -7,7 +7,7 @@ import type { PromptAgentOptions, ScratchpadAgentProgress } from "./index";
 import type { ScratchpadWhiteboardSnapshot } from "./index";
 import { OTHER_VALUE, composeAnswer, toggleChoice } from "./question";
 import { Badge, Button, Card, Input, Progress, Textarea, type Tone } from "./primitives";
-import { whiteboardRetryDelay } from "./whiteboard-retry";
+import { WhiteboardRetryGate } from "./whiteboard-retry";
 
 const EMPTY_OPTIONS: readonly AskQuestionOption[] = [];
 
@@ -28,8 +28,7 @@ export function Whiteboard({ id, refreshIntervalMs = 3000 }: WhiteboardProps): R
   const darkRef = useRef<boolean | undefined>(undefined);
   const mountedRef = useRef(true);
   const inFlightRef = useRef(false);
-  const failuresRef = useRef(0);
-  const retryAtRef = useRef(0);
+  const retryRef = useRef(new WhiteboardRetryGate(refreshIntervalMs));
   const openWhiteboard = globalThis.pragmaScratchpad?.openWhiteboard;
 
   const open = (): void => {
@@ -39,16 +38,14 @@ export function Whiteboard({ id, refreshIntervalMs = 3000 }: WhiteboardProps): R
     });
   };
 
-  // fallow-ignore-next-line complexity -- one bounded poll updates theme/version refs and the three request outcomes atomically.
   const refresh = useCallback(
+    // fallow-ignore-next-line complexity -- one bounded poll updates theme/version refs and the three request outcomes atomically.
     async (manual = false) => {
       // One snapshot request at a time: a poll tick or a manual refresh landing
       // while the host is still rendering would otherwise stack requests (and
-      // native PNG renders) instead of applying backpressure.
-      if (inFlightRef.current) return;
-      // A board that fails to render has no known version, so every tick would
-      // ask the host for a full render again. Back off instead; Refresh skips it.
-      if (!manual && Date.now() < retryAtRef.current) return;
+      // native PNG renders) instead of applying backpressure. A failing board
+      // also backs off, since it has no known version to skip a render with.
+      if (inFlightRef.current || !retryRef.current.allows(manual)) return;
       inFlightRef.current = true;
       try {
         const dark = document.documentElement.classList.contains("dark");
@@ -60,27 +57,23 @@ export function Whiteboard({ id, refreshIntervalMs = 3000 }: WhiteboardProps): R
           darkRef.current = dark;
           setSnapshot(next);
         }
-        failuresRef.current = 0;
-        retryAtRef.current = 0;
+        retryRef.current.succeeded();
         setError(null);
       } catch (cause) {
-        failuresRef.current += 1;
-        retryAtRef.current =
-          Date.now() + whiteboardRetryDelay(failuresRef.current, refreshIntervalMs);
+        retryRef.current.failed();
         if (mountedRef.current) setError(cause instanceof Error ? cause.message : String(cause));
       } finally {
         inFlightRef.current = false;
         if (mountedRef.current) setLoading(false);
       }
     },
-    [id, refreshIntervalMs],
+    [id],
   );
 
   useEffect(() => {
     mountedRef.current = true;
     inFlightRef.current = false;
-    failuresRef.current = 0;
-    retryAtRef.current = 0;
+    retryRef.current = new WhiteboardRetryGate(refreshIntervalMs);
     versionRef.current = undefined;
     darkRef.current = undefined;
     setSnapshot(null);
