@@ -72,6 +72,15 @@ window-vibrancy = "0.6"
 
 [dev-dependencies]
 tempfile = "3"
+tauri = { version = "2.11.2", features = ["test"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gtk = "0.18"
+
+# Native menus must be exercised on the OS main thread, not a libtest worker.
+[[test]]
+name = "linux_window_menu"
+harness = false
 
 # Deep links only reach a *running* app on Linux and Windows through the
 # single-instance plugin; its `deep-link` feature re-emits the forwarded URL
