@@ -604,6 +604,9 @@ TypeScript checks, the Rust checks, the Linux app build) lives in
 `.rwx/ci.yml`, and the
 macOS and Windows builds plus the Windows Rust suite stay in
 `.github/workflows/ci.yml`. **Adding or removing a check means touching both files.**
+Linux Rust tests run under Xvfb so the native GTK menu regression test executes
+rather than skipping for lack of a display; keep `xvfb` and `xauth` in the system packages.
+
 The macOS build cleans only `v8`'s release artifacts after restoring the Rust cache:
 rust-cache can prune `target/release/gn_out`'s native archive while retaining its
 build-script fingerprint, leaving `rusty_v8` missing. Keep that targeted clean so the
