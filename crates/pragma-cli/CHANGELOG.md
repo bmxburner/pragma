@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/pragma-sh/pragma/compare/pragma-cli-v1.3.0...pragma-cli-v1.3.1) (2026-10-17)
+
+
+### Miscellaneous Chores
+
+* **pragma-cli:** Synchronize desktop versions
+
 ## [1.3.0](https://github.com/pragma-sh/pragma/compare/pragma-cli-v1.2.1...pragma-cli-v1.3.0) (2026-10-10)
 
 
