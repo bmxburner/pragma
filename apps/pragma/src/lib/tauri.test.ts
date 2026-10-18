@@ -53,6 +53,8 @@ import {
   ptySpawnDetached,
   readAutomationSource,
   readFile,
+  readKanbanPreferences,
+  writeKanbanPreferences,
   renameFile,
   renameWorktree,
   restoreFanoutTab,
@@ -77,6 +79,17 @@ import {
 } from "./tauri";
 
 describe("stream IPC wrappers", () => {
+  it("persists opaque project board metadata through the centralized adapter", async () => {
+    const value = '{"overrides":{"worktree":"inProgress"}}';
+    invokeMock.mockResolvedValueOnce(value);
+    await expect(readKanbanPreferences("project")).resolves.toBe(value);
+    expect(invokeMock).toHaveBeenCalledWith("read_kanban_preferences", { projectId: "project" });
+    await writeKanbanPreferences("project", value);
+    expect(invokeMock).toHaveBeenCalledWith("write_kanban_preferences", {
+      projectId: "project",
+      value,
+    });
+  });
   it("sends home-tab notifications with a nullable project and listens only on this window", async () => {
     await showAgentNotification("Finished", "Home tab", null, "mini-home", "mini-tab");
     expect(invokeMock).toHaveBeenCalledWith("show_agent_notification", {

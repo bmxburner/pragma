@@ -861,6 +861,16 @@ export function listKanbanCards(projectId: string): Promise<KanbanPromptCard[]> 
   return invoke<KanbanPromptCard[]>("list_kanban_cards", { projectId });
 }
 
+/** Reads project board metadata as an opaque JSON document, durable across UI updates. */
+export function readKanbanPreferences(projectId: string): Promise<string | null> {
+  return invoke("read_kanban_preferences", { projectId });
+}
+
+/** Persists project board metadata in the desktop database. */
+export function writeKanbanPreferences(projectId: string, value: string): Promise<void> {
+  return invoke("write_kanban_preferences", { projectId, value });
+}
+
 /** Creates a fresh draft card scoped to a project. */
 export function createKanbanCard(
   projectId: string,

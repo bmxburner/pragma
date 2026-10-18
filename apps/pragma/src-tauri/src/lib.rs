@@ -1558,6 +1558,8 @@ pub fn run() {
             plugin_storage_set,
             plugin_storage_delete,
             kanban::list_kanban_cards,
+            kanban::read_kanban_preferences,
+            kanban::write_kanban_preferences,
             kanban::create_kanban_card,
             kanban::update_kanban_card,
             kanban::move_kanban_card,

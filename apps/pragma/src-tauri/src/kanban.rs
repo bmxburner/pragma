@@ -6,7 +6,36 @@ use pragma_constants::{KanbanPromptCard, KanbanPromptStatus};
 use tauri::State;
 
 use crate::db::Db;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
+
+/// Reads opaque project-board presentation and workflow metadata from SQLite.
+#[tauri::command]
+pub fn read_kanban_preferences(db: State<'_, Db>, project_id: String) -> AppResult<Option<String>> {
+    db.project(&project_id)?;
+    db.setting(&format!("kanban.preferences:{project_id}"))
+}
+
+/// Writes the board's JSON document without tying native code to its presentation schema.
+#[tauri::command]
+pub fn write_kanban_preferences(
+    db: State<'_, Db>,
+    project_id: String,
+    value: String,
+) -> AppResult<()> {
+    db.project(&project_id)?;
+    validate_preferences(&value)?;
+    db.set_setting(&format!("kanban.preferences:{project_id}"), &value)
+}
+
+fn validate_preferences(value: &str) -> AppResult<()> {
+    let parsed: serde_json::Value = serde_json::from_str(value)?;
+    if !parsed.is_object() {
+        return Err(AppError::InvalidInput(
+            "board preferences must be a JSON object".to_owned(),
+        ));
+    }
+    Ok(())
+}
 
 /// Lists a project's Kanban prompt cards.
 #[tauri::command]
@@ -61,4 +90,17 @@ pub fn move_kanban_card(
 #[tauri::command]
 pub fn delete_kanban_card(db: State<'_, Db>, id: String) -> AppResult<()> {
     db.delete_kanban_card(&id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_preferences;
+
+    #[test]
+    fn accepts_opaque_board_metadata_and_rejects_non_objects() {
+        assert!(validate_preferences(r##"{"categories":[{"id":"bug","name":"Bug","color":"#123456"}],"overrides":{"worktree":"inProgress"}}"##).is_ok());
+        for invalid in ["null", "[]", "false", "42", "\"text\"", "{broken"] {
+            assert!(validate_preferences(invalid).is_err(), "accepted {invalid}");
+        }
+    }
 }
