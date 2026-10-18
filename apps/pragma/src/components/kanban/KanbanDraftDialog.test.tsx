@@ -9,6 +9,7 @@ const updateCardDraftMock = vi.fn();
 
 vi.mock("@/state/kanban-context", () => ({
   useKanban: () => ({
+    preferences: { attempts: {} },
     createCard: createCardMock,
     updateCardDraft: updateCardDraftMock,
     deleteCard: vi.fn(),
@@ -129,5 +130,45 @@ describe("KanbanDraftDialog @ context", () => {
       prompt: `read @auth-guide carefully\n\n${docsBlock}`,
     });
     expect(contextResolveMock).not.toHaveBeenCalled();
+  });
+  it("saves repeatable fanout attempt selectors with the shared prompt", async () => {
+    render(
+      <KanbanDraftDialog open onOpenChange={vi.fn()} card={draftCard("Compare approaches")} />,
+    );
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Fan out" }), {
+      button: 0,
+      ctrlKey: false,
+    });
+    await screen.findByText("Attempts");
+    fireEvent.click(screen.getByRole("button", { name: "Add agent" }));
+    fireEvent.click(screen.getByRole("button", { name: /Save draft/ }));
+    await waitFor(() => expect(updateCardDraftMock).toHaveBeenCalled());
+    expect(updateCardDraftMock.mock.calls[0]![1].attempts).toHaveLength(3);
+    expect(updateCardDraftMock.mock.calls[0]![1].attempts[0]).toMatchObject({ selector: "claude" });
+  });
+
+  it("pre-fills a new draft from a suggestion seed", async () => {
+    render(
+      <KanbanDraftDialog
+        open
+        onOpenChange={vi.fn()}
+        card={null}
+        seed={{
+          branchName: "issue-12-login-crash",
+          prompt: "Address GitHub issue #12: Login crash",
+          agentId: "claude",
+        }}
+      />,
+    );
+    expect(screen.getByText("issue-12-login-crash")).toBeInTheDocument();
+    expect(screen.getByLabelText("Prompt")).toHaveValue("Address GitHub issue #12: Login crash");
+
+    fireEvent.click(screen.getByRole("button", { name: /Add draft/ }));
+    await waitFor(() => expect(createCardMock).toHaveBeenCalled());
+    expect(createCardMock.mock.calls[0]![0]).toMatchObject({
+      branchName: "issue-12-login-crash",
+      prompt: "Address GitHub issue #12: Login crash",
+      agentId: "claude",
+    });
   });
 });
