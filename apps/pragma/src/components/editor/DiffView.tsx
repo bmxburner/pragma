@@ -14,12 +14,22 @@ type LoadState =
   | { kind: "error"; message: string };
 
 /**
+ * The `Tab` fields {@link DiffView} reads. A full `Tab` satisfies it, and an
+ * embedded surface (the agent board's card preview) can pass a synthetic target
+ * instead of persisting a diff tab.
+ */
+export type DiffViewTarget = Pick<
+  Tab,
+  "id" | "worktreeId" | "filePath" | "diffSide" | "diffCommit"
+>;
+
+/**
  * Read-only side-by-side diff for `diff` tabs, backed by `@codemirror/merge`.
  * Loads the old/new text via the worktree-scoped `file_diff` command (keyed on
  * the tab id) and recomputes it live each time the tab opens. The file's
  * language grammar is resolved lazily so both panes get syntax highlighting.
  */
-export function DiffView({ tab }: { tab: Tab }) {
+export function DiffView({ tab }: { tab: DiffViewTarget }) {
   const { id: tabId, worktreeId, filePath, diffSide, diffCommit } = tab;
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [reloadNonce, setReloadNonce] = useState(0);

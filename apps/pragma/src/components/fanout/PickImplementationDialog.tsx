@@ -22,6 +22,7 @@ interface PickImplementationDialogProps {
   memberId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onPicked?: () => void;
 }
 
 /**
@@ -38,6 +39,7 @@ export function PickImplementationDialog({
   memberId,
   open,
   onOpenChange,
+  onPicked,
 }: PickImplementationDialogProps) {
   const fanouts = useFanouts();
   const workspace = useWorkspace();
@@ -56,6 +58,7 @@ export function PickImplementationDialog({
         setResult(null);
         fanouts.closeComparison();
         void workspace.selectWorktree(fanout.parentWorktreeId);
+        onPicked?.();
         toast.success(`Kept ${winner ? memberLabel(winner) : "the selected attempt"}.`);
       }
     } catch (cause) {

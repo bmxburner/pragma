@@ -37,13 +37,17 @@ const PR_REFRESH_INTERVAL_MS = 10_000;
 export function PullRequestTab({
   generatedDraft,
   generatedDraftKey,
+  worktreeId: targetWorktreeId,
+  onOpenFile,
 }: {
   generatedDraft?: AiPullRequestDraft | null;
   generatedDraftKey?: number;
+  worktreeId?: string;
+  onOpenFile?: (path: string) => void;
 }) {
   const { authenticated, loading: authLoading } = useGitHub();
   const workspace = useWorkspace();
-  const worktreeId = workspace.selectedWorktreeId;
+  const worktreeId = targetWorktreeId ?? workspace.selectedWorktreeId;
 
   if (authLoading) {
     return <CenteredMessage tone="muted">Checking GitHub sign-in…</CenteredMessage>;
@@ -67,6 +71,7 @@ export function PullRequestTab({
       generatedDraftKey={generatedDraftKey}
       key={worktreeId}
       worktreeId={worktreeId}
+      onOpenFile={onOpenFile}
     />
   );
 }
@@ -82,10 +87,12 @@ function PullRequestResolver({
   generatedDraft,
   generatedDraftKey,
   worktreeId,
+  onOpenFile,
 }: {
   generatedDraft?: AiPullRequestDraft | null;
   generatedDraftKey?: number;
   worktreeId: string;
+  onOpenFile?: (path: string) => void;
 }) {
   const [state, setState] = useState<ResolveState>({ kind: "loading" });
   // Drops responses for a stale worktree (the resolver is keyed by worktree, so
@@ -168,6 +175,7 @@ function PullRequestResolver({
   }
   return (
     <ViewPullRequestView
+      onOpenFile={onOpenFile}
       onChanged={(change) => {
         if (change?.conflictsPushed) {
           setState({ ...state, pr: settle.start(state.pr, () => refresh(true)) });
