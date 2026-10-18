@@ -13,21 +13,18 @@ import { useRequiredContext } from "@/lib/context";
 
 import { toast } from "sonner";
 
-import type {
-  AgentReportPayload,
-  KanbanCompletedAction,
-  KanbanPromptCard,
-  Worktree,
-} from "@pragma-sh/constants";
+import type { KanbanCompletedAction, KanbanPromptCard, Worktree } from "@pragma-sh/constants";
 
 import { useAgentsList } from "@/hooks/use-agents-list";
 import { startBackgroundAgentSession } from "@/lib/agent-launch";
+import { commitThenDraftPullRequest } from "@/lib/commit-and-draft";
 import { createPullRequest } from "@/lib/github";
 import { defaultTabTitle } from "@/lib/tab-title";
 import {
   type AgentConfig,
   aiCommitAllAndGeneratePullRequestDraft,
   aiGenerateCommitMessage,
+  aiGeneratePullRequestDraft,
   commitStaged,
   createKanbanCard,
   createTab as createTabCommand,
@@ -38,13 +35,26 @@ import {
   githubRepoRef,
   listKanbanCards,
   mergeWorktreeToParent,
-  moveKanbanCard,
   onKanbanChanged,
-  onAgentReport,
   stageAll,
   updateKanbanCard,
+  worktreeStatus,
 } from "@/lib/tauri";
 import { useWorkspace } from "@/state/workspace-context";
+import { useFanouts } from "@/state/fanouts-context";
+import { useAgentStatusSnapshot } from "@/state/agent-status-store";
+import {
+  boardCardKey,
+  projectBoardCards,
+  type BoardAttempt,
+  type BoardCard,
+  type BoardPreferences,
+} from "@/lib/kanban-model";
+import {
+  useBoardPreferences,
+  useBoardPreferencesLoading,
+  updateBoardPreferences,
+} from "@/state/kanban-preferences";
 import { trackWorktreeActivity } from "@/state/worktree-activity-store";
 
 /** Which surface the workspace is showing: normal shell, agent board, or settings. */
@@ -52,6 +62,7 @@ type WorkspaceMode = "normal" | "kanban" | "settings";
 
 /** Fields a draft card carries when created or edited. */
 interface KanbanDraftInput {
+  attempts?: BoardAttempt[];
   branchName: string;
   prompt: string;
   agentId: string;
@@ -77,7 +88,13 @@ interface KanbanContextValue {
   /** True when a card-driven navigation left a "Back to agent board" affordance up. */
   backToKanbanAvailable: boolean;
   /** Cards for the selected project. */
-  cards: KanbanPromptCard[];
+  cards: BoardCard[];
+  preferences: BoardPreferences;
+  preferencesLoading: boolean;
+  moveCard: (
+    card: KanbanPromptCard,
+    status: "inProgress" | "reviewNeeded" | "completed",
+  ) => Promise<void>;
   loading: boolean;
   /** Configured agents, for resolving a card's agent name/config. */
   agents: AgentConfig[];
@@ -122,6 +139,23 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+/** Materializes metadata only when a discovered checkout needs a persisted board action. */
+async function persistBoardCard(card: KanbanPromptCard): Promise<KanbanPromptCard> {
+  const metadata: BoardCard = { ...card };
+  delete metadata.fanout;
+  delete metadata.attempts;
+  if (!card.id.startsWith("worktree:")) return metadata;
+  const created = await createKanbanCard(
+    card.projectId,
+    card.branchName,
+    card.prompt,
+    card.agentId,
+    card.modelId ?? null,
+    card.reasoningId ?? null,
+  );
+  return updateKanbanCard({ ...metadata, id: created.id });
+}
+
 /** Picks an existing worktree on the card's branch, or branches a fresh one off the project main. */
 async function resolveStartCardWorktree(
   projectWorktrees: Worktree[],
@@ -158,8 +192,15 @@ async function applyCompletionAction(
     return { pullRequestUrl: null, pullRequestNumber: null };
   }
   if (action === "commitPr" && worktreeId) {
+    // A fanout winner is merged and committed into the parent by the host, so
+    // completing that card has nothing left to commit: draft from the existing
+    // commits instead of failing with "There are no changes to commit."
     const draft = await trackWorktreeActivity(worktreeId, "commit-and-draft", () =>
-      aiCommitAllAndGeneratePullRequestDraft(worktreeId),
+      commitThenDraftPullRequest({
+        dirty: async () => (await worktreeStatus(worktreeId)).dirty,
+        commitAndDraft: () => aiCommitAllAndGeneratePullRequestDraft(worktreeId),
+        draftOnly: () => aiGeneratePullRequestDraft(worktreeId),
+      }),
     );
     const repo = await githubRepoRef(worktreeId);
     await trackWorktreeActivity(worktreeId, "push", () => githubPushBranch(worktreeId));
@@ -208,28 +249,14 @@ async function runCompletionInBackground(
       completedAction: null,
       completedAt: null,
     });
+    await updateBoardPreferences(card.projectId, (current) => ({
+      ...current,
+      overrides: { ...current.overrides, [boardCardKey(card)]: "reviewNeeded" },
+    }));
     toast.error(cause instanceof Error ? cause.message : String(cause));
   } finally {
     await reload();
   }
-}
-
-/** Moves an in-progress card to Review needed when its agent tab reports `done`. */
-function moveInProgressCardToReview(
-  payload: AgentReportPayload,
-  cardsRef: RefObject<KanbanPromptCard[]>,
-  reload: () => Promise<void>,
-): void {
-  if (payload.status !== "done") {
-    return;
-  }
-  const card = cardsRef.current.find(
-    (item) => item.agentTabId === payload.tabId && item.status === "inProgress",
-  );
-  if (!card) {
-    return;
-  }
-  void moveKanbanCard(card.id, "reviewNeeded").then(() => reload());
 }
 
 /** Loads and clears cards as the selected project changes. */
@@ -237,15 +264,12 @@ function useKanbanCards(projectId: string | null): {
   cards: KanbanPromptCard[];
   loading: boolean;
   reload: () => Promise<void>;
-  cardsRef: RefObject<KanbanPromptCard[]>;
   setCardStatus: (cardId: string, status: KanbanPromptCard["status"]) => void;
 } {
   const [cards, setCards] = useState<KanbanPromptCard[]>([]);
   const [loading, setLoading] = useState(false);
   const projectIdRef = useRef(projectId);
   projectIdRef.current = projectId;
-  const cardsRef = useRef(cards);
-  cardsRef.current = cards;
   const setCardStatus = useCallback((cardId: string, status: KanbanPromptCard["status"]) => {
     setCards((current) => current.map((card) => (card.id === cardId ? { ...card, status } : card)));
   }, []);
@@ -290,34 +314,7 @@ function useKanbanCards(projectId: string | null): {
       unlisten?.();
     };
   }, [projectIdRef, reload]);
-  return { cards, loading, reload, cardsRef, setCardStatus };
-}
-
-/** Moves in-progress cards to Review needed as their agent tabs report `done`. */
-function useKanbanCompletionSync(
-  cardsRef: RefObject<KanbanPromptCard[]>,
-  reload: () => Promise<void>,
-): void {
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | null = null;
-    onAgentReport((payload) => {
-      moveInProgressCardToReview(payload, cardsRef, reload);
-    })
-      .then((stop) => {
-        if (cancelled) {
-          stop();
-          return undefined;
-        }
-        unlisten = stop;
-        return undefined;
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, [cardsRef, reload]);
+  return { cards, loading, reload, setCardStatus };
 }
 
 /** Draft mutations: create, edit, and delete cards (and their worktrees). */
@@ -336,7 +333,7 @@ function useKanbanCardDrafts(
       if (!target) {
         return;
       }
-      await createKanbanCard(
+      const card = await createKanbanCard(
         target,
         input.branchName,
         input.prompt,
@@ -344,20 +341,31 @@ function useKanbanCardDrafts(
         input.modelId,
         input.reasoningId,
       );
+      if (input.attempts?.length) {
+        await updateBoardPreferences(target, (current) => ({
+          ...current,
+          attempts: { ...current.attempts, [card.id]: input.attempts! },
+        }));
+      }
       await reload();
     },
     [projectIdRef, reload],
   );
   const updateCardDraft = useCallback(
     async (card: KanbanPromptCard, input: KanbanDraftInput) => {
+      const metadata = await persistBoardCard(card);
       await updateKanbanCard({
-        ...card,
+        ...metadata,
         branchName: input.branchName,
         prompt: input.prompt,
         agentId: input.agentId,
         modelId: input.modelId,
         reasoningId: input.reasoningId,
       });
+      await updateBoardPreferences(card.projectId, (current) => ({
+        ...current,
+        attempts: { ...current.attempts, [card.id]: input.attempts ?? [] },
+      }));
       await reload();
     },
     [reload],
@@ -373,7 +381,7 @@ function useKanbanCardDrafts(
           force: true,
         });
       }
-      await deleteKanbanCard(card.id);
+      if (!card.id.startsWith("worktree:")) await deleteKanbanCard(card.id);
       await reload();
     },
     [workspaceRef, reload],
@@ -443,6 +451,13 @@ async function launchCard(
     agentTabId: tab.id,
     startedAt: nowIso(),
   });
+  await updateBoardPreferences(card.projectId, (current) => ({
+    ...current,
+    assignments: {
+      ...current.assignments,
+      [worktree.id]: current.assignments[card.id] ?? current.assignments[worktree.id] ?? "",
+    },
+  }));
 }
 
 /** Card lifecycle: start a card, run completion inline, complete in background, or open its worktree. */
@@ -503,7 +518,8 @@ function useKanbanCardLifecycle(
   );
 
   const runCompletion = useCallback(
-    async (card: KanbanPromptCard, action: KanbanCompletedAction) => {
+    async (input: KanbanPromptCard, action: KanbanCompletedAction) => {
+      const card = await persistBoardCard(input);
       const worktreeId = card.worktreeId;
       if (!worktreeId && action !== "manual") {
         throw new Error("Card has no worktree to complete");
@@ -522,13 +538,18 @@ function useKanbanCardLifecycle(
         completedAt: nowIso(),
       });
       await reload();
+      await updateBoardPreferences(card.projectId, (current) => ({
+        ...current,
+        overrides: { ...current.overrides, [boardCardKey(card)]: "completed" },
+      }));
       return saved;
     },
     [reload],
   );
 
   const completeCard = useCallback(
-    async (card: KanbanPromptCard, action: KanbanCompletedAction) => {
+    async (input: KanbanPromptCard, action: KanbanCompletedAction) => {
+      const card = await persistBoardCard(input);
       const worktreeId = card.worktreeId;
       if (!worktreeId) {
         toast.error("Card has no worktree to complete");
@@ -544,6 +565,10 @@ function useKanbanCardLifecycle(
       });
       setCompleting((current) => ({ ...current, [card.id]: action }));
       await reload();
+      await updateBoardPreferences(card.projectId, (current) => ({
+        ...current,
+        overrides: { ...current.overrides, [boardCardKey(card)]: "completed" },
+      }));
       // Run the heavy git/AI/GitHub work in the background, off the caller's await.
       void runCompletionInBackground(card, action, worktreeId, reload).finally(() => {
         setCompleting((current) => {
@@ -636,6 +661,8 @@ function useKanbanBoardMode(projectId: string | null): {
 
 export function KanbanProvider({ children }: { children: ReactNode }) {
   const workspace = useWorkspace();
+  const fanouts = useFanouts();
+  const statuses = useAgentStatusSnapshot();
   const [completing, setCompleting] = useState<Record<string, KanbanCompletedAction>>({});
 
   const projectId = workspace.selectedProjectId;
@@ -660,14 +687,76 @@ export function KanbanProvider({ children }: { children: ReactNode }) {
     setMode,
   } = useKanbanBoardMode(projectId);
   const agents = useAgentsList();
-  const { cards, loading, reload, cardsRef, setCardStatus } = useKanbanCards(projectId);
-  useKanbanCompletionSync(cardsRef, reload);
+  const { cards: savedCards, loading, reload, setCardStatus } = useKanbanCards(projectId);
+  const preferences = useBoardPreferences(projectId);
+  const preferencesLoading = useBoardPreferencesLoading(projectId);
+  const cards = useMemo(
+    () =>
+      projectBoardCards(
+        savedCards,
+        projectId ? (workspace.worktrees[projectId] ?? []) : [],
+        workspace.tabs,
+        statuses,
+        fanouts.fanouts,
+        preferences.overrides,
+      ),
+    [
+      savedCards,
+      workspace.worktrees,
+      workspace.tabs,
+      projectId,
+      statuses,
+      fanouts.fanouts,
+      preferences.overrides,
+    ],
+  );
+  // A fresh ordinary run reopens a completed card. Fix-it's explicit hold wins.
+  useEffect(() => {
+    if (!projectId) return;
+    const reopened = cards.filter(
+      (card) =>
+        card.status === "inProgress" &&
+        card.worktreeId &&
+        preferences.overrides[card.worktreeId] !== "inProgress" &&
+        (preferences.overrides[card.worktreeId] === "completed" ||
+          (preferences.overrides[card.worktreeId] === undefined && card.completedAt)),
+    );
+    if (!reopened.length) return;
+    void updateBoardPreferences(projectId, (current) => ({
+      ...current,
+      overrides: {
+        ...current.overrides,
+        ...Object.fromEntries(reopened.map((card) => [card.worktreeId!, "reviewNeeded" as const])),
+      },
+    })).catch((cause) => toast.error(cause instanceof Error ? cause.message : String(cause)));
+  }, [cards, preferences.overrides, projectId]);
+  const moveCard = useCallback(
+    async (card: KanbanPromptCard, status: "inProgress" | "reviewNeeded" | "completed") => {
+      const saved = await persistBoardCard(card);
+      await updateKanbanCard({
+        ...saved,
+        status,
+        completedAt: status === "completed" ? nowIso() : null,
+      });
+      await updateBoardPreferences(card.projectId, (current) => ({
+        ...current,
+        overrides: { ...current.overrides, [boardCardKey(card)]: status },
+      }));
+      await reload();
+    },
+    [reload],
+  );
   const { createCard, updateCardDraft, deleteCard } = useKanbanCardDrafts(
     workspaceRef,
     projectIdRef,
     reload,
   );
-  const { startCard, runCompletion, completeCard, openCardWorktree } = useKanbanCardLifecycle(
+  const {
+    startCard: startSingleCard,
+    runCompletion,
+    completeCard,
+    openCardWorktree,
+  } = useKanbanCardLifecycle(
     workspaceRef,
     agents,
     reload,
@@ -675,6 +764,45 @@ export function KanbanProvider({ children }: { children: ReactNode }) {
     setCompleting,
     setBackToKanbanAvailable,
     setMode,
+  );
+  const startCard = useCallback(
+    async (card: KanbanPromptCard, options?: { syncMainWorktreeId?: string | null }) => {
+      const metadata = await persistBoardCard(card);
+      const attempts = preferences.attempts[card.id];
+      if (!attempts?.length) return startSingleCard(metadata, options);
+      const parent = workspaceRef.current.worktrees[card.projectId]?.find(
+        (worktree) => worktree.isMain,
+      );
+      if (!parent) throw new Error("No parent worktree to branch from");
+      if (options?.syncMainWorktreeId) await githubPullBranch(options.syncMainWorktreeId);
+      const result = await fanouts.create({
+        projectId: card.projectId,
+        parent: { kind: "new", sourceWorktreeId: parent.id, branch: card.branchName, title: null },
+        prompt: card.prompt,
+        defaultReasoningId: null,
+        members: attempts.map(({ selector, modelId, reasoningId }) => ({
+          selector,
+          modelId,
+          reasoningId,
+        })),
+      });
+      await updateKanbanCard({
+        ...metadata,
+        worktreeId: result.fanout.parentWorktreeId,
+        status: "inProgress",
+        startedAt: nowIso(),
+      });
+      await updateBoardPreferences(card.projectId, (current) => ({
+        ...current,
+        assignments: {
+          ...current.assignments,
+          [result.fanout.parentWorktreeId]: current.assignments[card.id] ?? "",
+        },
+      }));
+      await workspaceRef.current.refreshProject(card.projectId);
+      await reload();
+    },
+    [preferences.attempts, startSingleCard, fanouts, reload],
   );
 
   const value = useMemo<KanbanContextValue>(
@@ -688,6 +816,9 @@ export function KanbanProvider({ children }: { children: ReactNode }) {
       returnToKanban,
       backToKanbanAvailable,
       cards,
+      preferences,
+      preferencesLoading,
+      moveCard,
       loading,
       agents,
       reload,
@@ -711,6 +842,9 @@ export function KanbanProvider({ children }: { children: ReactNode }) {
       returnToKanban,
       backToKanbanAvailable,
       cards,
+      preferences,
+      preferencesLoading,
+      moveCard,
       loading,
       agents,
       reload,

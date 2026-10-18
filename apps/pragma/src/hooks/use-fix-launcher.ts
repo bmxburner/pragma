@@ -4,6 +4,8 @@ import { type AgentSelection, useAgentSelection } from "@/hooks/use-agent-select
 import { rememberModelSelection } from "@/lib/agent-model-selection";
 import { createWorktree } from "@/lib/tauri";
 import { useWorkspace } from "@/state/workspace-context";
+import { useKanban } from "@/state/kanban-context";
+import { markBoardFixInProgress } from "@/state/kanban-preferences";
 
 function messageFor(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
@@ -38,6 +40,7 @@ export interface FixLauncher {
 
 export function useFixLauncher(active: boolean, worktreeId: string): FixLauncher {
   const workspace = useWorkspace();
+  const kanban = useKanban();
   const selection = useAgentSelection(active);
   const [enabled, setEnabled] = useState(false);
   const [branch, setBranch] = useState("");
@@ -74,9 +77,16 @@ export function useFixLauncher(active: boolean, worktreeId: string): FixLauncher
         );
         // Load the new worktree into state so its terminal tab resolves its cwd.
         await workspace.refreshProject(projectId);
-        await workspace.startSession(worktree.id, agent, prompt, selection.modelSelection);
+        await workspace.startSession(worktree.id, agent, prompt, selection.modelSelection, {
+          focus: kanban.mode !== "kanban",
+        });
+        await markBoardFixInProgress(projectId, worktree.id);
       } else {
-        await workspace.startSession(worktreeId, agent, prompt, selection.modelSelection);
+        await workspace.startSession(worktreeId, agent, prompt, selection.modelSelection, {
+          focus: kanban.mode !== "kanban",
+        });
+        if (workspace.selectedProjectId)
+          await markBoardFixInProgress(workspace.selectedProjectId, worktreeId);
       }
       return true;
     } catch (cause) {
