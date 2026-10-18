@@ -1,6 +1,6 @@
 ---
 title: Plugin development
-description: The @pragma-sh/plugin API — sidebar tabs, cards, commands, web views, agents, watchers, account providers, and themes.
+description: The @pragma-sh/plugin API — sidebar tabs, cards, commands, web views, agents, watchers, prompt context, suggested drafts, account providers, and themes.
 ---
 
 Pragma's own agent integrations are plugins. Everything they use is public, so anything
@@ -38,6 +38,11 @@ export default definePlugin({
     title="Agents & watchers"
     description="defineAgent, model lists, prefill, and the watcher that drives status."
     href="/docs/plugins/agents"
+  />
+  <Card
+    title="Prompt context & drafts"
+    description="defineContextProvider for the @ picker and defineSuggestedDraftProvider for the agent board."
+    href="/docs/plugins/context"
   />
   <Card
     title="Account providers"

@@ -17,6 +17,7 @@ import type { PluginDeepLinkEvent } from "./types";
 import type { WatcherDefinition } from "./watcher";
 import type { AccountProviderDefinition } from "./accounts";
 import type { UsageLimitProviderDefinition } from "./usage-limits";
+import type { SuggestedDraftProviderDefinition } from "./suggestions";
 import type { ThemeDefinition } from "./theme";
 
 /** Infers a config schema's parsed output type, defaulting to `unknown` when no schema is given. */
@@ -65,6 +66,8 @@ export interface PluginDefinitionInput<TConfigSchema extends ZodTypeAny = ZodTyp
   commands?: CommandDefinition<InferConfig<TConfigSchema>>[];
   /** Sources of `@` context for the desktop's agent prompt fields. */
   contextProviders?: ContextProviderDefinition<InferConfig<TConfigSchema>>[];
+  /** Sources of suggested drafts for the desktop's agent board. */
+  suggestedDrafts?: SuggestedDraftProviderDefinition<InferConfig<TConfigSchema>>[];
   settings?: PluginSettingsContributions;
   keybindings?: PluginKeybindingsContributions;
   events?: PluginEventHandlers<InferConfig<TConfigSchema>>;

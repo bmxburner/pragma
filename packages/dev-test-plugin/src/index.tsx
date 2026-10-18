@@ -13,11 +13,12 @@ import { OverviewTab } from "./overview-tab";
 import { openReportWebView, reportWebView } from "./report-webview";
 import { DevTestSettingsPage } from "./settings-page";
 import { testMentionsProvider } from "./test-mentions";
+import { testSuggestionsProvider } from "./test-suggestions";
 
 export default definePlugin({
   name: "Pragma Dev Test Plugin",
   description:
-    "Dev/test plugin: a random secondary sidebar tab, a sidebar card, and an SDK event hook.",
+    "Dev/test plugin: sidebar tabs, a sidebar card, an SDK event hook, and agent-board suggested drafts.",
   ui: {
     sidebarTabs: [
       defineSidebarTab({ id: "overview", title: "Overview", component: OverviewTab }),
@@ -39,6 +40,7 @@ export default definePlugin({
     webViews: [reportWebView],
   },
   contextProviders: [testMentionsProvider],
+  suggestedDrafts: [testSuggestionsProvider],
   commands: [
     defineCommand({
       id: "pragma-dev-test-plugin.hello",
