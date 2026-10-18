@@ -1016,8 +1016,13 @@ actions with native window APIs, targeting the focused window (Mini included), w
 the main window as fallback. Close Window has no Ctrl+W accelerator: that belongs to
 Close Tab. macOS and Windows retain their native predefined items.
 `cargo test -p pragma --test linux_window_menu` exercises the replacement with real
-native menu objects on the OS main thread, even on macOS, without starting Pragma's
-servers or webviews. On headless Linux use `xvfb-run -a` (otherwise it reports a skip).
+native menu objects on the OS main thread, including macOS, without starting Pragma's
+servers or webviews. It is **Unix-only**: a Tauri test binary imports comctl32 v6-only
+symbols (`TaskDialogIndirect`), but `tauri-build` embeds the common-controls manifest
+into the main executable alone, so on Windows the test exe would abort at load with
+`STATUS_ENTRYPOINT_NOT_FOUND` (0xc0000139); Windows keeps its native predefined items
+and needs no coverage here. On headless Linux use `xvfb-run -a` (otherwise it reports a
+skip).
 
 **Settings is opened through the native menu, command palette, or shortcut.** The
 project-sidebar footer has no Settings button. Outside macOS the menu bar is drawn

@@ -1,11 +1,25 @@
 //! Exercises the Linux replacement using real native menu objects, including on
 //! macOS. No Pragma server, webview, or dev server is started.
+//!
+//! Unix-only. A Tauri test binary imports comctl32 v6-only symbols
+//! (`TaskDialogIndirect`, via tao/tauri dialogs), but `tauri-build` embeds the
+//! common-controls manifest into the main executable alone — so on Windows the
+//! test exe aborts at load with `STATUS_ENTRYPOINT_NOT_FOUND` (0xc0000139)
+//! before any test runs. The replacement is Linux-only and macOS keeps the
+//! native predefined items, so Windows needs no coverage here.
 
+#[cfg(unix)]
 #[path = "../src/window_menu.rs"]
 mod window_menu;
 
+#[cfg(unix)]
 use tauri::menu::{Menu, MenuItem, MenuItemKind, Submenu, WINDOW_SUBMENU_ID};
 
+// `harness = false` needs a real `main`; on Windows it is an empty no-op.
+#[cfg(not(unix))]
+fn main() {}
+
+#[cfg(unix)]
 fn main() {
     // Linux CI may have no display server. Run under xvfb-run to exercise GTK.
     if cfg!(target_os = "linux")
@@ -69,6 +83,7 @@ fn main() {
     println!("PASS linux_window_menu: real native items, replacement, ordering, event isolation");
 }
 
+#[cfg(unix)]
 fn assert_window_items(menu: &Menu<tauri::Wry>) {
     let submenu = menu.get(WINDOW_SUBMENU_ID).unwrap();
     let submenu = submenu.as_submenu().unwrap();
