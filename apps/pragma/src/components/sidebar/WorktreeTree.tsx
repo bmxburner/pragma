@@ -44,13 +44,10 @@ import { Separator } from "@/components/ui/separator";
 import { AgentStatusDot } from "@/components/AgentStatusDot";
 import { WorktreeDeleteDialog } from "@/components/dialogs/WorktreeDeleteDialog";
 import { editorLaunchers } from "@/lib/editor-launchers";
-import {
-  findPullRequestForBranch,
-  pullRequestLifecycle,
-  type GitHubPrLifecycle,
-} from "@/lib/github";
+import { type GitHubPrLifecycle } from "@/lib/github";
+import { useWorktreePrLifecycles } from "@/hooks/use-worktree-pr-lifecycles";
 import { subscribeToWorktreeFiles } from "@/lib/file-watch";
-import { githubRepoRef, worktreesMergedStatus } from "@/lib/tauri";
+import { worktreesMergedStatus } from "@/lib/tauri";
 import { buildWorktreeTree, pendingWorktreeIndex, type WorktreeNode } from "@/lib/worktree-tree";
 import { commitOnEnterCancelOnEscape } from "@/lib/keyboard";
 import { projectIsGit, worktreeDisplayLabel } from "@/lib/non-git-project";
@@ -91,8 +88,6 @@ const MERGED_STATUS_FALLBACK_INTERVAL_MS = 30_000;
 const MERGED_STATUS_MIN_REFRESH_INTERVAL_MS = 2000;
 /** Coalesces the filesystem events emitted by one logical save. */
 const MERGED_STATUS_INVALIDATION_DEBOUNCE_MS = 250;
-/** PR lifecycle poll — matches the Pull Request tab so both stay in lockstep. */
-const PR_STATUS_REFRESH_INTERVAL_MS = 10_000;
 
 /** True when both maps hold exactly the same worktree-id → merged entries. */
 function sameMergedStatus(a: Record<string, boolean>, b: Record<string, boolean>): boolean {
@@ -132,24 +127,6 @@ function applyMergedStatusFailure(
   return sameMergedStatus(previous, next) ? previous : next;
 }
 
-/** A worktree's pull request as the sidebar shows it: lifecycle plus number. */
-interface WorktreePr {
-  lifecycle: GitHubPrLifecycle;
-  number: number | null;
-}
-
-/** True when both maps hold the same worktree-id → PR entries. */
-function samePrs(a: Record<string, WorktreePr>, b: Record<string, WorktreePr>): boolean {
-  const aKeys = Object.keys(a);
-  const bKeys = Object.keys(b);
-  return (
-    aKeys.length === bKeys.length &&
-    aKeys.every(
-      (key) => a[key]?.lifecycle === b[key]?.lifecycle && a[key]?.number === b[key]?.number,
-    )
-  );
-}
-
 /** Lifecycles whose PR is still open, so its number is worth showing on the row. */
 const OPEN_PR_LIFECYCLES: ReadonlySet<GitHubPrLifecycle> = new Set(["open", "draft", "merging"]);
 
@@ -185,86 +162,6 @@ function worktreeGlyph(
     Icon: merged || prLifecycle === "merged" ? GitMerge : GitBranch,
     className: prLifecycleIconClass(prLifecycle) ?? (merged ? "text-success" : undefined),
   };
-}
-
-/**
- * Poll GitHub PR lifecycle (and number) per child worktree (cached; background
- * revalidate). Green = open PR, purple = merged, red = closed. Same cadence as
- * the PR tab.
- */
-function useWorktreePrLifecycles(
-  worktrees: Worktree[],
-  authenticated: boolean,
-): {
-  prLifecycleByWorktreeId: Record<string, GitHubPrLifecycle>;
-  prNumberByWorktreeId: Record<string, number>;
-} {
-  const [prByWorktreeId, setPrByWorktreeId] = useState<Record<string, WorktreePr>>({});
-
-  useEffect(() => {
-    const childWorktrees = worktrees.filter((worktree) => !worktree.isMain && worktree.parentId);
-    if (!authenticated || childWorktrees.length === 0) {
-      setPrByWorktreeId((previous) => (Object.keys(previous).length === 0 ? previous : {}));
-      return;
-    }
-    let cancelled = false;
-    let refreshInFlight = false;
-
-    async function refreshPrLifecycle() {
-      if (refreshInFlight) return;
-      refreshInFlight = true;
-      try {
-        const entries = await Promise.all(
-          childWorktrees.map(async (worktree) => {
-            try {
-              const repo = await githubRepoRef(worktree.id);
-              const pr = await findPullRequestForBranch(repo, { includeClosed: true });
-              return [
-                worktree.id,
-                { lifecycle: pullRequestLifecycle(pr), number: pr?.number ?? null },
-              ] as const;
-            } catch {
-              // Failed lookup: report no lifecycle at all rather than "none",
-              // so a transient GitHub error can't sort the row into the no-PR
-              // bucket ahead of worktrees whose PRs did resolve.
-              return [worktree.id, undefined] as const;
-            }
-          }),
-        );
-        if (cancelled) return;
-        setPrByWorktreeId((previous) => {
-          const next: Record<string, WorktreePr> = {};
-          for (const [id, pr] of entries) {
-            // Carry the last known lifecycle forward across a failed refresh.
-            const resolved = pr ?? previous[id];
-            if (resolved !== undefined) next[id] = resolved;
-          }
-          return samePrs(previous, next) ? previous : next;
-        });
-      } finally {
-        refreshInFlight = false;
-      }
-    }
-
-    void refreshPrLifecycle();
-    const interval = setInterval(() => {
-      if (!document.hidden) void refreshPrLifecycle();
-    }, PR_STATUS_REFRESH_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [worktrees, authenticated]);
-
-  return useMemo(() => {
-    const prLifecycleByWorktreeId: Record<string, GitHubPrLifecycle> = {};
-    const prNumberByWorktreeId: Record<string, number> = {};
-    for (const [id, pr] of Object.entries(prByWorktreeId)) {
-      prLifecycleByWorktreeId[id] = pr.lifecycle;
-      if (pr.number !== null) prNumberByWorktreeId[id] = pr.number;
-    }
-    return { prLifecycleByWorktreeId, prNumberByWorktreeId };
-  }, [prByWorktreeId]);
 }
 
 /** Tracks local merged-into-parent status for child worktrees.
