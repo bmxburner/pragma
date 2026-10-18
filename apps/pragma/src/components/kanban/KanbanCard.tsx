@@ -11,13 +11,17 @@ import { IconButton } from "@/components/ui/icon-button";
 import type { AgentConfig } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useTabAgentStatus } from "@/state/agent-status-store";
+import { BoardAgentProgress } from "@/components/kanban/BoardAgentProgress";
+import { memberLabel } from "@/lib/fanout";
+import type { BoardCard, BoardPreferences } from "@/lib/kanban-model";
 
 const COMPLETING_BADGE_CLASS = "bg-warning/15 text-warning";
 const PR_BADGE_CLASS = "bg-skill/15 text-skill";
 const MERGED_BADGE_CLASS = "bg-success/15 text-success";
 
 interface KanbanCardProps {
-  card: KanbanPromptCard;
+  card: BoardCard;
+  category?: BoardPreferences["categories"][number];
   /** Agent launcher config resolved from the card's agentId. */
   agent: AgentConfig | null;
   /** The background completion action running on this card, if any. */
@@ -47,7 +51,7 @@ function completedBadge(
       spinning: true,
     };
   }
-  if (card.pullRequestUrl) {
+  if (card.pullRequestUrl || card.pullRequestNumber) {
     return {
       label: card.pullRequestNumber ? `PR #${card.pullRequestNumber}` : "PR",
       className: PR_BADGE_CLASS,
@@ -129,7 +133,13 @@ function KanbanCardHeader({
       <GitBranch className="size-3.5 shrink-0" />
       <span className="truncate font-medium text-foreground">{card.branchName}</span>
       {card.status === "inProgress" ? (
-        <AgentStatusDot status={agentStatus} className="ml-auto" />
+        card.worktreeId ? (
+          <span className="ml-auto">
+            <BoardAgentProgress worktreeId={card.worktreeId} iconOnly />
+          </span>
+        ) : (
+          <AgentStatusDot status={agentStatus} className="ml-auto" />
+        )
       ) : null}
       {badge ? <KanbanCardBadge badge={badge} /> : null}
     </div>
@@ -150,6 +160,7 @@ export function KanbanCard({
   onEdit,
   onOpen,
   onDelete,
+  category,
 }: KanbanCardProps) {
   // Only in-progress cards have a live agent session to reflect.
   const agentStatus = useTabAgentStatus(
@@ -189,8 +200,7 @@ export function KanbanCard({
     [onDelete, card],
   );
 
-  const badge: CompletedBadge | null =
-    card.status === "completed" ? completedBadge(card, completingAction ?? null) : null;
+  const badge = completedBadge(card, completingAction ?? null);
   // Draft cards open their editor; started cards open their worktree/session.
   const cardProps = clickable
     ? {
@@ -206,10 +216,53 @@ export function KanbanCard({
     // oxlint-disable-next-line jsx-a11y/no-static-element-interactions -- clickable cards add role/tabIndex/keydown below; non-clickable cards attach no handlers.
     <div className="space-y-2 rounded-lg border border-border bg-card p-3 shadow-sm" {...cardProps}>
       <KanbanCardHeader card={card} agentStatus={agentStatus} badge={badge} />
+      {category ? (
+        <span
+          className="inline-flex items-center gap-1.5 text-xs"
+          style={{ color: category.color }}
+        >
+          <span className="size-2 rounded-full" style={{ backgroundColor: category.color }} />
+          {category.name}
+        </span>
+      ) : null}
 
       <p className="line-clamp-3 whitespace-pre-wrap text-sm">
         {splitPromptContext(card.prompt).prompt.trim() || "No prompt"}
       </p>
+      {card.status === "draft" && card.attempts?.length ? (
+        <div className="space-y-1 border-l-2 border-border pl-2">
+          {card.attempts.map((attempt) => (
+            <div key={attempt.key} className="rounded border border-border p-2 text-xs">
+              {attempt.selector} · {attempt.modelId ?? "Default model"}
+              {attempt.reasoningId ? ` · ${attempt.reasoningId}` : ""}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {card.fanout ? (
+        <div className="space-y-2 border-l-2 border-border pl-2">
+          {card.fanout.members.map((member) => (
+            <button
+              type="button"
+              key={member.id}
+              disabled={!member.worktreeId}
+              onClick={(event) => {
+                event.stopPropagation();
+                if (member.worktreeId)
+                  onOpen({ ...card, worktreeId: member.worktreeId, agentTabId: member.tabId });
+              }}
+              className="block w-full rounded border border-border bg-background/40 p-2 text-left text-xs hover:bg-accent"
+            >
+              <div className="truncate">
+                {memberLabel(member)} · {member.status}
+              </div>
+              {member.worktreeId ? <BoardAgentProgress worktreeId={member.worktreeId} /> : null}
+            </button>
+          ))}
+        </div>
+      ) : card.worktreeId ? (
+        <BoardAgentProgress worktreeId={card.worktreeId} />
+      ) : null}
 
       <KanbanCardFooter card={card} displayAgent={displayAgent} onDelete={handleDelete} />
     </div>

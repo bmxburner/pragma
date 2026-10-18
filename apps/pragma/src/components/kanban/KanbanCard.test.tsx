@@ -149,4 +149,11 @@ describe("KanbanCard", () => {
     expect(screen.queryByRole("button", { name: "Start card" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Complete" })).toBeNull();
   });
+  it("keeps the PR number clickable through the agent popup while a fix runs", () => {
+    const props = noopProps();
+    const fixing = card({ status: "inProgress", pullRequestNumber: 42 });
+    render(<KanbanCard card={fixing} {...props} />);
+    fireEvent.click(screen.getByText("PR #42"));
+    expect(props.onOpen).toHaveBeenCalledWith(fixing);
+  });
 });
