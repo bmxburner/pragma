@@ -58,42 +58,53 @@ type StoredPreferences = Omit<BoardPreferences, "dismissedSuggestions"> & {
   dismissedSuggestions?: string[];
 };
 
-function isPreferences(value: unknown): value is StoredPreferences {
-  if (
-    !isRecord(value) ||
-    !Array.isArray(value.categories) ||
-    !isRecord(value.assignments) ||
-    !isRecord(value.attempts) ||
-    !isRecord(value.overrides) ||
-    (value.dismissedSuggestions !== undefined && !Array.isArray(value.dismissedSuggestions))
-  )
-    return false;
+const HEX_COLOR = /^#[\da-f]{6}$/i;
+const OVERRIDE_STATUSES = new Set<unknown>(["completed", "inProgress", "reviewNeeded"]);
+
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+
+function isNullableString(value: unknown): boolean {
+  return value === null || isString(value);
+}
+
+function isCategory(value: unknown): boolean {
   return (
-    (value.dismissedSuggestions ?? []).every((key: unknown) => typeof key === "string") &&
-    value.categories.every(
-      (category: unknown) =>
-        isRecord(category) &&
-        typeof category.id === "string" &&
-        typeof category.name === "string" &&
-        typeof category.color === "string" &&
-        /^#[\da-f]{6}$/i.test(category.color),
-    ) &&
-    Object.values(value.assignments).every((id) => typeof id === "string") &&
-    Object.values(value.overrides).every(
-      (status) => status === "completed" || status === "inProgress" || status === "reviewNeeded",
-    ) &&
-    Object.values(value.attempts).every(
-      (attempts) =>
-        Array.isArray(attempts) &&
-        attempts.every(
-          (attempt: unknown) =>
-            isRecord(attempt) &&
-            typeof attempt.key === "string" &&
-            typeof attempt.selector === "string" &&
-            (attempt.modelId === null || typeof attempt.modelId === "string") &&
-            (attempt.reasoningId === null || typeof attempt.reasoningId === "string"),
-        ),
-    )
+    isRecord(value) &&
+    isString(value.id) &&
+    isString(value.name) &&
+    isString(value.color) &&
+    HEX_COLOR.test(value.color)
+  );
+}
+
+function isAttempt(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isString(value.key) &&
+    isString(value.selector) &&
+    isNullableString(value.modelId) &&
+    isNullableString(value.reasoningId)
+  );
+}
+
+function isArrayOf(value: unknown, item: (entry: unknown) => boolean): boolean {
+  return Array.isArray(value) && value.every(item);
+}
+
+function isRecordOf(value: unknown, item: (entry: unknown) => boolean): boolean {
+  return isRecord(value) && Object.values(value).every(item);
+}
+
+function isPreferences(value: unknown): value is StoredPreferences {
+  return (
+    isRecord(value) &&
+    isArrayOf(value.categories, isCategory) &&
+    isRecordOf(value.assignments, isString) &&
+    isRecordOf(value.overrides, (status) => OVERRIDE_STATUSES.has(status)) &&
+    isRecordOf(value.attempts, (attempts) => isArrayOf(attempts, isAttempt)) &&
+    isArrayOf(value.dismissedSuggestions ?? [], isString)
   );
 }
 

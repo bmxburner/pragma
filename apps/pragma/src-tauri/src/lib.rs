@@ -1562,7 +1562,6 @@ pub fn run() {
             kanban::write_kanban_preferences,
             kanban::create_kanban_card,
             kanban::update_kanban_card,
-            kanban::move_kanban_card,
             kanban::delete_kanban_card,
             fs::list_dir_entries,
             fs::create_file,

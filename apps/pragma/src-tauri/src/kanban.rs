@@ -2,7 +2,7 @@
 //! cards persist in `SQLite` (see `db.rs`); these commands are thin CRUD wrappers
 //! plus a dedicated status move, mirroring the split-layout persistence pattern.
 
-use pragma_constants::{KanbanPromptCard, KanbanPromptStatus};
+use pragma_constants::KanbanPromptCard;
 use tauri::State;
 
 use crate::db::Db;
@@ -74,16 +74,6 @@ pub fn update_kanban_card(
     card: KanbanPromptCard,
 ) -> AppResult<KanbanPromptCard> {
     db.update_kanban_card(&card)
-}
-
-/// Moves a card to a different column (status only).
-#[tauri::command]
-pub fn move_kanban_card(
-    db: State<'_, Db>,
-    id: String,
-    status: KanbanPromptStatus,
-) -> AppResult<KanbanPromptCard> {
-    db.move_kanban_card(&id, status)
 }
 
 /// Deletes a card.

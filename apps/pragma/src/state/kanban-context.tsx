@@ -13,7 +13,12 @@ import { useRequiredContext } from "@/lib/context";
 
 import { toast } from "sonner";
 
-import type { KanbanCompletedAction, KanbanPromptCard, Worktree } from "@pragma-sh/constants";
+import type {
+  Fanout,
+  KanbanCompletedAction,
+  KanbanPromptCard,
+  Worktree,
+} from "@pragma-sh/constants";
 
 import { useAgentsList } from "@/hooks/use-agents-list";
 import { startBackgroundAgentSession } from "@/lib/agent-launch";
@@ -659,45 +664,23 @@ function useKanbanBoardMode(projectId: string | null): {
   };
 }
 
-export function KanbanProvider({ children }: { children: ReactNode }) {
+/** The board projected from saved cards and the project's live checkouts. */
+function useProjectBoardCards(
+  projectId: string | null,
+  savedCards: KanbanPromptCard[],
+  statuses: ReturnType<typeof useAgentStatusSnapshot>,
+  fanouts: Fanout[],
+  preferences: BoardPreferences,
+): BoardCard[] {
   const workspace = useWorkspace();
-  const fanouts = useFanouts();
-  const statuses = useAgentStatusSnapshot();
-  const [completing, setCompleting] = useState<Record<string, KanbanCompletedAction>>({});
-
-  const projectId = workspace.selectedProjectId;
-  const projectIdRef = useRef(projectId);
-  projectIdRef.current = projectId;
-
-  // Latest workspace handles, readable from stable callbacks without re-creating
-  // them on every workspace state change.
-  const workspaceRef = useRef(workspace);
-  workspaceRef.current = workspace;
-
-  const {
-    mode,
-    backToKanbanAvailable,
-    openBoard,
-    openSettings,
-    closeSettings,
-    settingsSection,
-    exitBoard,
-    returnToKanban,
-    setBackToKanbanAvailable,
-    setMode,
-  } = useKanbanBoardMode(projectId);
-  const agents = useAgentsList();
-  const { cards: savedCards, loading, reload, setCardStatus } = useKanbanCards(projectId);
-  const preferences = useBoardPreferences(projectId);
-  const preferencesLoading = useBoardPreferencesLoading(projectId);
-  const cards = useMemo(
+  return useMemo(
     () =>
       projectBoardCards(
         savedCards,
         projectId ? (workspace.worktrees[projectId] ?? []) : [],
         workspace.tabs,
         statuses,
-        fanouts.fanouts,
+        fanouts,
         preferences.overrides,
       ),
     [
@@ -706,31 +689,57 @@ export function KanbanProvider({ children }: { children: ReactNode }) {
       workspace.tabs,
       projectId,
       statuses,
-      fanouts.fanouts,
+      fanouts,
       preferences.overrides,
     ],
   );
-  // A fresh ordinary run reopens a completed card. Fix-it's explicit hold wins.
+}
+
+/** Running cards that were completed (manually or by record) and were not held by fix-it. */
+function reopenedCards(cards: BoardCard[], overrides: BoardPreferences["overrides"]): string[] {
+  return cards.flatMap((card) => {
+    if (card.status !== "inProgress" || !card.worktreeId) return [];
+    const override = overrides[card.worktreeId];
+    const wasCompleted = override === "completed" || (override === undefined && card.completedAt);
+    return wasCompleted ? [card.worktreeId] : [];
+  });
+}
+
+/** A fresh ordinary run reopens a completed card. Fix-it's explicit hold wins. */
+function useReopenCompletedCards(
+  projectId: string | null,
+  cards: BoardCard[],
+  overrides: BoardPreferences["overrides"],
+) {
   useEffect(() => {
     if (!projectId) return;
-    const reopened = cards.filter(
-      (card) =>
-        card.status === "inProgress" &&
-        card.worktreeId &&
-        preferences.overrides[card.worktreeId] !== "inProgress" &&
-        (preferences.overrides[card.worktreeId] === "completed" ||
-          (preferences.overrides[card.worktreeId] === undefined && card.completedAt)),
-    );
+    const reopened = reopenedCards(cards, overrides);
     if (!reopened.length) return;
     void updateBoardPreferences(projectId, (current) => ({
       ...current,
       overrides: {
         ...current.overrides,
-        ...Object.fromEntries(reopened.map((card) => [card.worktreeId!, "reviewNeeded" as const])),
+        ...Object.fromEntries(reopened.map((worktreeId) => [worktreeId, "reviewNeeded" as const])),
       },
     })).catch((cause) => toast.error(cause instanceof Error ? cause.message : String(cause)));
-  }, [cards, preferences.overrides, projectId]);
-  const moveCard = useCallback(
+  }, [cards, overrides, projectId]);
+}
+
+/** The project's saved cards, board preferences, and the live board projected from them. */
+function useBoardData(projectId: string | null) {
+  const fanouts = useFanouts();
+  const statuses = useAgentStatusSnapshot();
+  const { cards: savedCards, loading, reload, setCardStatus } = useKanbanCards(projectId);
+  const preferences = useBoardPreferences(projectId);
+  const preferencesLoading = useBoardPreferencesLoading(projectId);
+  const cards = useProjectBoardCards(projectId, savedCards, statuses, fanouts.fanouts, preferences);
+  useReopenCompletedCards(projectId, cards, preferences.overrides);
+  return { fanouts, cards, loading, reload, setCardStatus, preferences, preferencesLoading };
+}
+
+/** Moves a card between workflow columns and records the choice as an override. */
+function useBoardMoveCard(reload: () => Promise<void>): KanbanContextValue["moveCard"] {
+  return useCallback(
     async (card: KanbanPromptCard, status: "inProgress" | "reviewNeeded" | "completed") => {
       const saved = await persistBoardCard(card);
       await updateKanbanCard({
@@ -746,26 +755,20 @@ export function KanbanProvider({ children }: { children: ReactNode }) {
     },
     [reload],
   );
-  const { createCard, updateCardDraft, deleteCard } = useKanbanCardDrafts(
-    workspaceRef,
-    projectIdRef,
-    reload,
-  );
-  const {
-    startCard: startSingleCard,
-    runCompletion,
-    completeCard,
-    openCardWorktree,
-  } = useKanbanCardLifecycle(
-    workspaceRef,
-    agents,
-    reload,
-    setCardStatus,
-    setCompleting,
-    setBackToKanbanAvailable,
-    setMode,
-  );
-  const startCard = useCallback(
+}
+
+/**
+ * Starts a card: a single-agent launch, or — when the draft saved attempts — a
+ * host fanout branched from the project's main checkout.
+ */
+function useBoardStartCard(
+  workspaceRef: RefObject<ReturnType<typeof useWorkspace>>,
+  preferences: BoardPreferences,
+  startSingleCard: KanbanContextValue["startCard"],
+  fanouts: ReturnType<typeof useFanouts>,
+  reload: () => Promise<void>,
+): KanbanContextValue["startCard"] {
+  return useCallback(
     async (card: KanbanPromptCard, options?: { syncMainWorktreeId?: string | null }) => {
       const metadata = await persistBoardCard(card);
       const attempts = preferences.attempts[card.id];
@@ -802,8 +805,59 @@ export function KanbanProvider({ children }: { children: ReactNode }) {
       await workspaceRef.current.refreshProject(card.projectId);
       await reload();
     },
-    [preferences.attempts, startSingleCard, fanouts, reload],
+    [workspaceRef, preferences.attempts, startSingleCard, fanouts, reload],
   );
+}
+
+export function KanbanProvider({ children }: { children: ReactNode }) {
+  const workspace = useWorkspace();
+  const [completing, setCompleting] = useState<Record<string, KanbanCompletedAction>>({});
+
+  const projectId = workspace.selectedProjectId;
+  const projectIdRef = useRef(projectId);
+  projectIdRef.current = projectId;
+
+  // Latest workspace handles, readable from stable callbacks without re-creating
+  // them on every workspace state change.
+  const workspaceRef = useRef(workspace);
+  workspaceRef.current = workspace;
+
+  const {
+    mode,
+    backToKanbanAvailable,
+    openBoard,
+    openSettings,
+    closeSettings,
+    settingsSection,
+    exitBoard,
+    returnToKanban,
+    setBackToKanbanAvailable,
+    setMode,
+  } = useKanbanBoardMode(projectId);
+  const agents = useAgentsList();
+  const { fanouts, cards, loading, reload, setCardStatus, preferences, preferencesLoading } =
+    useBoardData(projectId);
+  const moveCard = useBoardMoveCard(reload);
+  const { createCard, updateCardDraft, deleteCard } = useKanbanCardDrafts(
+    workspaceRef,
+    projectIdRef,
+    reload,
+  );
+  const {
+    startCard: startSingleCard,
+    runCompletion,
+    completeCard,
+    openCardWorktree,
+  } = useKanbanCardLifecycle(
+    workspaceRef,
+    agents,
+    reload,
+    setCardStatus,
+    setCompleting,
+    setBackToKanbanAvailable,
+    setMode,
+  );
+  const startCard = useBoardStartCard(workspaceRef, preferences, startSingleCard, fanouts, reload);
 
   const value = useMemo<KanbanContextValue>(
     () => ({

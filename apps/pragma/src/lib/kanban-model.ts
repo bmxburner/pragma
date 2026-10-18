@@ -31,6 +31,92 @@ export function boardCardKey(card: KanbanPromptCard): string {
   return card.worktreeId ?? card.id;
 }
 
+const ACTIVE_STATUSES = new Set(["running", "attention"]);
+const ACTIVE_MEMBER_STATUSES = new Set(["running", "attention", "pending"]);
+
+function liveFanoutsFor(fanouts: Fanout[], worktrees: Worktree[]): Fanout[] {
+  return fanouts.filter(
+    (fanout) =>
+      fanout.status !== "completed" &&
+      fanout.status !== "cancelled" &&
+      worktrees.some((worktree) => worktree.id === fanout.parentWorktreeId),
+  );
+}
+
+function memberWorktreeIds(fanout: Fanout | undefined): string[] {
+  return fanout?.members.flatMap((member) => (member.worktreeId ? [member.worktreeId] : [])) ?? [];
+}
+
+function isWorktreeRunning(
+  worktreeId: string,
+  fanout: Fanout | undefined,
+  statuses: AgentStatusEntry[],
+): boolean {
+  const relatedIds = new Set([worktreeId, ...memberWorktreeIds(fanout)]);
+  const agentActive = statuses.some(
+    (entry) => relatedIds.has(entry.worktreeId) && ACTIVE_STATUSES.has(entry.status),
+  );
+  return (
+    agentActive ||
+    Boolean(fanout?.members.some((member) => ACTIVE_MEMBER_STATUSES.has(member.status)))
+  );
+}
+
+function boardStatus(
+  running: boolean,
+  override: BoardPreferences["overrides"][string] | undefined,
+  existing: KanbanPromptCard | undefined,
+): KanbanPromptCard["status"] {
+  if (running || override === "inProgress") return "inProgress";
+  if (override === "completed") return "completed";
+  if (override === undefined && existing?.status === "completed") return "completed";
+  return "reviewNeeded";
+}
+
+interface WorktreeCardInput {
+  worktree: Worktree;
+  existing: KanbanPromptCard | undefined;
+  fanout: Fanout | undefined;
+  agentTab: Tab | undefined;
+  status: KanbanPromptCard["status"];
+}
+
+/** A worktree with no saved card gets one named after its checkout. */
+function defaultWorktreeCard(
+  worktree: Worktree,
+  fanout: Fanout | undefined,
+  agentTab: Tab | undefined,
+): Omit<KanbanPromptCard, "status"> {
+  return {
+    id: `worktree:${worktree.id}`,
+    projectId: worktree.projectId,
+    branchName: worktree.branch,
+    prompt: fanout?.prompt ?? worktree.title ?? worktree.branch,
+    schedulingMode: "manual",
+    agentId: agentTab?.agentId ?? "",
+    createdAt: worktree.createdAt,
+    updatedAt: worktree.createdAt,
+  };
+}
+
+function worktreeCard({
+  worktree,
+  existing,
+  fanout,
+  agentTab,
+  status,
+}: WorktreeCardInput): BoardCard {
+  return {
+    modelId: null,
+    reasoningId: null,
+    ...(existing ?? defaultWorktreeCard(worktree, fanout, agentTab)),
+    worktreeId: worktree.id,
+    agentTabId: agentTab?.id ?? existing?.agentTabId ?? null,
+    status,
+    ...(fanout ? { fanout } : {}),
+  };
+}
+
 /**
  * Builds the board from current checkouts; stale persisted cards never resurrect
  * deleted worktrees. Hidden worktrees are omitted, matching the sidebar, so
@@ -44,15 +130,8 @@ export function projectBoardCards(
   fanouts: Fanout[],
   overrides: BoardPreferences["overrides"],
 ): BoardCard[] {
-  const liveFanouts = fanouts.filter(
-    (fanout) =>
-      fanout.status !== "completed" &&
-      fanout.status !== "cancelled" &&
-      worktrees.some((worktree) => worktree.id === fanout.parentWorktreeId),
-  );
-  const attempts = new Set(
-    liveFanouts.flatMap((fanout) => fanout.members.map((member) => member.worktreeId)),
-  );
+  const liveFanouts = liveFanoutsFor(fanouts, worktrees);
+  const attempts = new Set(liveFanouts.flatMap(memberWorktreeIds));
   const cards: BoardCard[] = saved.filter(
     (card) => !card.worktreeId && (card.status === "draft" || card.status === "inProgress"),
   );
@@ -60,49 +139,16 @@ export function projectBoardCards(
     if (worktree.isMain || worktree.hidden || attempts.has(worktree.id)) continue;
     const existing = saved.find((card) => card.worktreeId === worktree.id);
     const fanout = liveFanouts.find((item) => item.parentWorktreeId === worktree.id);
-    const relatedIds = new Set([
-      worktree.id,
-      ...(fanout?.members.flatMap((member) => (member.worktreeId ? [member.worktreeId] : [])) ??
-        []),
-    ]);
-    const running =
-      statuses.some(
-        (entry) =>
-          relatedIds.has(entry.worktreeId) &&
-          (entry.status === "running" || entry.status === "attention"),
-      ) ||
-      Boolean(
-        fanout?.members.some(
-          (member) =>
-            member.status === "running" ||
-            member.status === "attention" ||
-            member.status === "pending",
-        ),
-      );
-    const agentTab = tabs.find((tab) => tab.worktreeId === worktree.id && tab.agentId);
-    const override = overrides[worktree.id];
-    cards.push({
-      id: existing?.id ?? `worktree:${worktree.id}`,
-      projectId: worktree.projectId,
-      branchName: worktree.branch,
-      prompt: fanout?.prompt ?? existing?.prompt ?? worktree.title ?? worktree.branch,
-      schedulingMode: "manual",
-      agentId: existing?.agentId ?? agentTab?.agentId ?? "",
-      modelId: existing?.modelId ?? null,
-      reasoningId: existing?.reasoningId ?? null,
-      createdAt: existing?.createdAt ?? worktree.createdAt,
-      updatedAt: existing?.updatedAt ?? worktree.createdAt,
-      ...existing,
-      worktreeId: worktree.id,
-      agentTabId: agentTab?.id ?? existing?.agentTabId ?? null,
-      status:
-        running || override === "inProgress"
-          ? "inProgress"
-          : override === "completed" || (override === undefined && existing?.status === "completed")
-            ? "completed"
-            : "reviewNeeded",
-      ...(fanout ? { fanout } : {}),
-    });
+    const running = isWorktreeRunning(worktree.id, fanout, statuses);
+    cards.push(
+      worktreeCard({
+        worktree,
+        existing,
+        fanout,
+        agentTab: tabs.find((tab) => tab.worktreeId === worktree.id && tab.agentId),
+        status: boardStatus(running, overrides[worktree.id], existing),
+      }),
+    );
   }
   return cards;
 }

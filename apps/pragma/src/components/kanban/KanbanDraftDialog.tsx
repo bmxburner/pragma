@@ -562,6 +562,70 @@ function useDraftPromptContext(
   return usePromptContext({ isOpen: open, project: workspace.activeProject, worktree, editor });
 }
 
+type DraftForm = ReturnType<typeof useKanbanDraftForm>;
+
+/** Switches between one agent and a fanout, seeding two attempts on first switch. */
+function DraftModeTabs({ form }: { form: DraftForm }) {
+  return (
+    <Tabs
+      value={form.fanoutMode ? "fanout" : "single"}
+      onValueChange={(value) => {
+        form.setFanoutMode(value === "fanout");
+        if (value === "fanout" && !form.fanoutRows.length)
+          form.setFanoutRows([
+            newFanoutRow(form.agentId, form.modelSelection),
+            newFanoutRow(form.agentId, form.modelSelection),
+          ]);
+      }}
+    >
+      <TabsList>
+        <TabsTrigger value="single">Single agent</TabsTrigger>
+        <TabsTrigger value="fanout">Fan out</TabsTrigger>
+      </TabsList>
+    </Tabs>
+  );
+}
+
+/** Discard (when editing), Cancel, and the submit button with its shortcut hint. */
+function DraftActions({
+  form,
+  editing,
+  canSubmit,
+  onCancel,
+}: {
+  form: DraftForm;
+  editing: boolean;
+  canSubmit: boolean;
+  onCancel: () => void;
+}) {
+  const submitShortcut = isMacPlatform() ? "⌘↵" : "Ctrl+↵";
+  return (
+    <div className="flex justify-between gap-2">
+      <div>
+        {editing ? (
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={form.busy}
+            onClick={() => void form.discard()}
+          >
+            Discard
+          </Button>
+        ) : null}
+      </div>
+      <div className="flex gap-2">
+        <Button type="button" variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button type="submit" disabled={!canSubmit}>
+          {editing ? "Save draft" : "Add draft"}
+          <span className="ml-2 text-xs opacity-70">{submitShortcut}</span>
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /**
  * Creates or edits a Kanban draft card. The user writes a markdown prompt, picks
  * an agent/model, and selects an existing project worktree branch or types a new
@@ -584,7 +648,6 @@ export function KanbanDraftDialog({
     form.context.handleKeyDown(event);
     if (!event.defaultPrevented) handleKeyDown(event);
   };
-  const submitShortcut = isMacPlatform() ? "⌘↵" : "Ctrl+↵";
   useEscapeClosesPickerFirst(isOpen, [form.context], () => onOpenChange(false));
 
   return (
@@ -605,22 +668,7 @@ export function KanbanDraftDialog({
               if (canSubmit) void auto.submit();
             }}
           >
-            <Tabs
-              value={form.fanoutMode ? "fanout" : "single"}
-              onValueChange={(value) => {
-                form.setFanoutMode(value === "fanout");
-                if (value === "fanout" && !form.fanoutRows.length)
-                  form.setFanoutRows([
-                    newFanoutRow(form.agentId, form.modelSelection),
-                    newFanoutRow(form.agentId, form.modelSelection),
-                  ]);
-              }}
-            >
-              <TabsList>
-                <TabsTrigger value="single">Single agent</TabsTrigger>
-                <TabsTrigger value="fanout">Fan out</TabsTrigger>
-              </TabsList>
-            </Tabs>
+            <DraftModeTabs form={form} />
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-2">
                 <Label htmlFor="kanban-branch">Branch</Label>
@@ -677,29 +725,12 @@ export function KanbanDraftDialog({
               />
             </div>
             {form.error ? <p className="text-sm text-destructive">{form.error}</p> : null}
-            <div className="flex justify-between gap-2">
-              <div>
-                {card ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    disabled={form.busy}
-                    onClick={() => void form.discard()}
-                  >
-                    Discard
-                  </Button>
-                ) : null}
-              </div>
-              <div className="flex gap-2">
-                <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
-                  Cancel
-                </Button>
-                <Button type="submit" disabled={!canSubmit}>
-                  {card ? "Save draft" : "Add draft"}
-                  <span className="ml-2 text-xs opacity-70">{submitShortcut}</span>
-                </Button>
-              </div>
-            </div>
+            <DraftActions
+              form={form}
+              editing={Boolean(card)}
+              canSubmit={canSubmit}
+              onCancel={() => onOpenChange(false)}
+            />
           </form>
         </ModalShell>
       ) : null}

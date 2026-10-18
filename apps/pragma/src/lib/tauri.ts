@@ -20,7 +20,6 @@ import type {
   AgentSound,
   AgentSoundList,
   KanbanPromptCard,
-  KanbanPromptStatus,
   KeybindingsConfig,
   Project,
   ProjectIcon,
@@ -893,11 +892,6 @@ export function createKanbanCard(
 /** Persists every mutable field of a card (draft edits and status transitions). */
 export function updateKanbanCard(card: KanbanPromptCard): Promise<KanbanPromptCard> {
   return invoke<KanbanPromptCard>("update_kanban_card", { card });
-}
-
-/** Moves a card to a different column (status only). */
-export function moveKanbanCard(id: string, status: KanbanPromptStatus): Promise<KanbanPromptCard> {
-  return invoke<KanbanPromptCard>("move_kanban_card", { id, status });
 }
 
 /** Deletes a Kanban card. */
