@@ -1008,10 +1008,26 @@ settings". Keep that arm gated
 silently drops every accelerator on Windows _and_ trips `-D warnings` there, since all
 five bindings then go unused.
 
-**Settings must never depend on the native menu alone.** Outside macOS the menu bar is
-drawn inside the window and several Linux desktops (and any GTK build with the menu bar
-hidden) never show it, so Settings also has a gear button in the project-sidebar footer,
-an "Open settings" command-palette entry, and a real `openSettings` keybinding
+**Linux's Window menu uses ordinary items, not predefined window items.** Tauri's
+default Minimize / Maximize / Close Window items are unsupported by muda's GTK
+backend and silently disappear, leaving a blank popup on Wayland and X11 (including
+WSLg). `src-tauri/src/window_menu.rs` replaces that submenu on Linux and handles its
+actions with native window APIs, targeting the focused window (Mini included), with
+the main window as fallback. Close Window has no Ctrl+W accelerator: that belongs to
+Close Tab. macOS and Windows retain their native predefined items.
+`cargo test -p pragma --test linux_window_menu` exercises the replacement with real
+native menu objects on the OS main thread, including macOS, without starting Pragma's
+servers or webviews. It is **Unix-only**: a Tauri test binary imports comctl32 v6-only
+symbols (`TaskDialogIndirect`), but `tauri-build` embeds the common-controls manifest
+into the main executable alone, so on Windows the test exe would abort at load with
+`STATUS_ENTRYPOINT_NOT_FOUND` (0xc0000139); Windows keeps its native predefined items
+and needs no coverage here. On headless Linux use `xvfb-run -a` (otherwise it reports a
+skip).
+
+**Settings is opened through the native menu, command palette, or shortcut.** The
+project-sidebar footer has no Settings button. Outside macOS the menu bar is drawn
+inside the window and some Linux desktops hide it, so Settings also has an
+"Open settings" command-palette entry and a real `openSettings` keybinding
 (`⌘,`/`Ctrl+,`) handled in the webview. `menu_accelerator` therefore returns `None` for
 `settings.open` off macOS, and `use-shortcuts.ts` only defers that chord to the native
 menu when the platform is `mac` (`MAC_ONLY_NATIVE_MENU_ACTIONS`) — otherwise the two would

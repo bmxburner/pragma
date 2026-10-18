@@ -45,7 +45,7 @@ jobs:
         run: bash apps/pragma/src-tauri/scripts/stage-daemon-sidecar.sh
       - name: Lint (clippy)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - name: Unit tests (cargo test)
+      - name: Rust tests (including native menu regression)
         # PRAGMA_TEST_PTY opts in to the test that spawns a real shell on a real
         # pseudo-terminal (ConPTY on Windows). It is off by default because a
         # sandboxed local executor may not be allowed to allocate one.
