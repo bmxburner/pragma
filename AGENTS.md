@@ -561,6 +561,8 @@ moves them to one version. Three rules hold that together:
 - **A folder spec needs a leading `./`.** `npm publish packages/sdk` resolves as the GitHub shorthand `github:packages/sdk` and dies in `git ls-remote`; `./packages/sdk` is a directory. The same applies to `npm pack`.
 - **Publishing is irreversible**, so `scripts/publish-packages.ts` is a dry run unless passed `--publish`, and it skips a version already on the registry so a partially-failed job can be re-run.
 
+**`node-workspace` propagates through `devDependencies` too, so the agent plugins re-release with no source change.** Each agent plugin names `@pragma-sh/plugin`, `@pragma-sh/sdk`, and/or `@pragma-sh/watcher-kit` as `workspace:*` **devDependencies** (build-time only — `bun build … --packages bundle` inlines them). `node-workspace` builds its graph from every dependency section, so because those three live in the linked `desktop` group and bump on every desktop release, every desktop release cuts a patch release of each dependent plugin — its diff is only the range rewrite and its changelog a bare "Dependencies" note. `prime-agent-plugin` cascades a second time off `pi-plugin`, which also bumped. This is expected, not a missed commit. `apps/pragma-go` deliberately opts out: `release-type: simple` makes `node-workspace` skip a package entirely (`WorkspacePlugin.buildAllPackages` drops any non-`node` release type), which is exactly what `scripts/release-config.test.ts` asserts ("a dependency bump alone never releases the mobile app"). Converting a bundled consumer to `simple` is how you take it off the dependency-driven train.
+
 Publishing needs **no npm token**: every one of the nine names `pragma-sh/pragma` +
 `release.yml` as a trusted publisher, so the job's `id-token` authenticates it and signs
 provenance. The ten agent plugins under `@pragma-sh` trust
@@ -602,6 +604,12 @@ TypeScript checks, the Rust checks, the Linux app build) lives in
 `.rwx/ci.yml`, and the
 macOS and Windows builds plus the Windows Rust suite stay in
 `.github/workflows/ci.yml`. **Adding or removing a check means touching both files.**
+Linux Rust tests run under Xvfb so the native GTK menu regression test executes
+rather than skipping for lack of a display; keep `xvfb` and `xauth` in the system packages.
+That regression test (`linux_window_menu`) is Unix-only and no-ops on Windows — a Tauri
+test binary there imports comctl32 v6-only symbols the runner's loader cannot bind, so it
+would abort with `STATUS_ENTRYPOINT_NOT_FOUND` before running.
+
 The macOS build cleans only `v8`'s release artifacts after restoring the Rust cache:
 rust-cache can prune `target/release/gn_out`'s native archive while retaining its
 build-script fingerprint, leaving `rusty_v8` missing. Keep that targeted clean so the

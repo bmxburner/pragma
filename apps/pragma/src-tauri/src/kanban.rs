@@ -8,7 +8,7 @@ use tauri::State;
 use crate::db::Db;
 use crate::error::{AppError, AppResult};
 
-/// Reads opaque project-board presentation and workflow metadata from SQLite.
+/// Reads opaque project-board presentation and workflow metadata from `SQLite`.
 #[tauri::command]
 pub fn read_kanban_preferences(db: State<'_, Db>, project_id: String) -> AppResult<Option<String>> {
     db.project(&project_id)?;

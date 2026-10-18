@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/pragma-sh/pragma/compare/pragma-server-v1.3.0...pragma-server-v1.3.1) (2026-10-17)
+
+
+### Miscellaneous Chores
+
+* **pragma-server:** Synchronize desktop versions
+
 ## [1.3.0](https://github.com/pragma-sh/pragma/compare/pragma-server-v1.2.1...pragma-server-v1.3.0) (2026-10-10)
 
 

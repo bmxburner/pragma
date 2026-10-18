@@ -43,6 +43,8 @@ mod system1;
 mod updates;
 mod whiteboards;
 mod window_chrome;
+#[cfg(target_os = "linux")]
+mod window_menu;
 mod workspace_mirror;
 mod worktrees;
 mod wsl;
@@ -283,6 +285,8 @@ fn install_deep_links(app: &tauri::App) {
 fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     let menu = Menu::default(app)?;
     install_workspace_menu(app, &menu)?;
+    #[cfg(target_os = "linux")]
+    window_menu::install(app, &menu)?;
     let restart_daemon = MenuItem::with_id(
         app,
         MENU_RESTART_DAEMON,
@@ -308,6 +312,10 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     app.set_menu(menu)?;
     app.on_menu_event(|app, event| {
         let action = event.id().as_ref();
+        #[cfg(target_os = "linux")]
+        if window_menu::handle(app, action, MAIN_WINDOW_LABEL) {
+            return;
+        }
         if action == MENU_NEW_MINI_WINDOW {
             mini_window::open_in_background(app);
             return;
