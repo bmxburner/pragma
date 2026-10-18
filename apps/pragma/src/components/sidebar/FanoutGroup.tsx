@@ -14,7 +14,7 @@ import {
   orderedMembers,
 } from "@/lib/fanout";
 import { errorMessage } from "@/lib/errors";
-import { restoreFanoutTab } from "@/lib/tauri";
+import { openAgentTab } from "@/lib/open-agent-tab";
 import { useTabAgentStatus } from "@/state/agent-status-store";
 import { useFanouts } from "@/state/fanouts-context";
 import { useKanban } from "@/state/kanban-context";
@@ -121,16 +121,9 @@ function FanoutMemberRow({
     if (tabId) {
       // Do not select the worktree before its host-created tab is restored: that
       // exposes the generic no-tabs welcome screen while adoption is in flight.
-      const openAgentTab = async () => {
-        const known = workspace.projectTabs.some(
-          (tab) => tab.id === tabId && tab.worktreeId === worktreeId,
-        );
-        if (!known) {
-          await restoreFanoutTab(projectId, worktreeId, tabId);
-        }
-        await workspace.activateTabLocation(projectId, worktreeId, tabId);
-      };
-      void openAgentTab().catch((cause) => toast.error(errorMessage(cause)));
+      void openAgentTab(workspace, projectId, worktreeId, tabId).catch((cause) =>
+        toast.error(errorMessage(cause)),
+      );
     } else {
       workspace.selectWorktree(worktreeId, projectId);
     }

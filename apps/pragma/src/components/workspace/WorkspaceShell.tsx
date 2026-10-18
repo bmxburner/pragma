@@ -29,6 +29,7 @@ import { errorMessage } from "@/lib/errors";
 import { requestAddProject } from "@/lib/non-git-project";
 import { terminalManager } from "@/lib/terminal-manager";
 import { reloadWebview, restartServer } from "@/lib/troubleshooting";
+import { useAgentProgressTracking } from "@/state/agent-progress-store";
 import { useKanban } from "@/state/kanban-context";
 import { LeftSidebarProvider } from "@/state/left-sidebar-context";
 import { useOnboarding } from "@/state/onboarding-context";
@@ -267,6 +268,10 @@ export function WorkspaceShell() {
   const kanban = useKanban();
   const { creation } = useWorktreeCreation();
   const requestClose = useConfirmClose();
+  // Mounted in the shell, not the sidebar: the agent board and Settings replace
+  // the sidebar, and the tracker must keep listening to agent messages so the
+  // board's progress stays live while it is showing.
+  useAgentProgressTracking();
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandPaletteMode, setCommandPaletteMode] = useState<"search" | "command">("search");
   const openCommandPalette = (mode: "search" | "command") => {

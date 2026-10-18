@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { type SuggestedDraftInput, SuggestedDraftProviderNotice } from "@pragma-sh/plugin/catalog";
@@ -75,5 +75,62 @@ describe("useSuggestedDrafts", () => {
     );
     expect(result.current.suggestions).toEqual([]);
     expect(suggest).not.toHaveBeenCalled();
+  });
+
+  it("publishes each provider as it finishes instead of awaiting the slowest", async () => {
+    let finishSlow: (() => void) | undefined;
+    const providers = [
+      provider("fast", async () => [{ id: "f", branchName: "f", prompt: "" }]),
+      provider(
+        "slow",
+        () =>
+          new Promise((resolve) => {
+            finishSlow = () => resolve([{ id: "s", branchName: "s", prompt: "" }]);
+          }),
+      ),
+    ];
+    const { result } = renderHook(() =>
+      useSuggestedDrafts({ isOpen: true, providers, project, worktree }),
+    );
+
+    await waitFor(() =>
+      expect(result.current.suggestions.map((entry) => entry.key)).toEqual(["fast:f"]),
+    );
+    expect(result.current.loading).toBe(true);
+
+    await act(async () => finishSlow?.());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.suggestions.map((entry) => entry.key)).toEqual(["fast:f", "slow:s"]);
+  });
+
+  it("drops the previous project's suggestions the moment the project changes", async () => {
+    let finishSecond: (() => void) | undefined;
+    const providers = [
+      provider("builtin:github", async () =>
+        currentProject === "a" ? [{ id: "a-1", branchName: "a-1", prompt: "" }] : [],
+      ),
+    ];
+    let currentProject = "a";
+    const { result, rerender } = renderHook(() =>
+      useSuggestedDrafts({
+        isOpen: true,
+        providers,
+        project: { ...project, id: currentProject },
+        worktree,
+      }),
+    );
+    await waitFor(() =>
+      expect(result.current.suggestions.map((entry) => entry.key)).toEqual(["builtin:github:a-1"]),
+    );
+
+    currentProject = "b";
+    providers[0]!.suggest = () =>
+      new Promise((resolve) => {
+        finishSecond = () => resolve([]);
+      });
+    rerender();
+    expect(result.current.suggestions).toEqual([]);
+
+    await act(async () => finishSecond?.());
   });
 });

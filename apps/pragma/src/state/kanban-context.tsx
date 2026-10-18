@@ -23,7 +23,9 @@ import type {
 import { useAgentsList } from "@/hooks/use-agents-list";
 import { startBackgroundAgentSession } from "@/lib/agent-launch";
 import { commitThenDraftPullRequest } from "@/lib/commit-and-draft";
+import { errorMessage } from "@/lib/errors";
 import { createPullRequest } from "@/lib/github";
+import { openAgentTab } from "@/lib/open-agent-tab";
 import { defaultTabTitle } from "@/lib/tab-title";
 import {
   type AgentConfig,
@@ -589,14 +591,28 @@ function useKanbanCardLifecycle(
   const openCardWorktree = useCallback(
     (card: KanbanPromptCard) => {
       const ws = workspaceRef.current;
-      if (card.worktreeId) {
-        ws.selectWorktree(card.worktreeId);
-      }
-      if (card.agentTabId) {
-        ws.setActiveTab(card.agentTabId);
-      }
       setBackToKanbanAvailable(true);
       setMode("normal");
+      const { projectId, worktreeId, agentTabId } = card;
+      if (!worktreeId) {
+        return;
+      }
+      // Callers hand this a projected `BoardCard`; the extra field is runtime-only.
+      const fanout = (card as BoardCard).fanout;
+      if (fanout && agentTabId) {
+        // A fanout attempt's tab is host-created and may not have reached the
+        // desktop's tab list yet. Restore it before activating it; `setActiveTab`
+        // alone silently no-ops for an unknown tab, leaving the worktree open
+        // without its running agent.
+        void openAgentTab(ws, projectId, worktreeId, agentTabId).catch((cause) =>
+          toast.error(errorMessage(cause)),
+        );
+        return;
+      }
+      ws.selectWorktree(worktreeId);
+      if (agentTabId) {
+        ws.setActiveTab(agentTabId);
+      }
     },
     [workspaceRef, setBackToKanbanAvailable, setMode],
   );

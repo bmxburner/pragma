@@ -136,8 +136,13 @@ export function projectBoardCards(
     (card) => !card.worktreeId && (card.status === "draft" || card.status === "inProgress"),
   );
   for (const worktree of worktrees) {
-    if (worktree.isMain || worktree.hidden || attempts.has(worktree.id)) continue;
+    if (worktree.hidden || attempts.has(worktree.id)) continue;
     const existing = saved.find((card) => card.worktreeId === worktree.id);
+    // The main checkout is the project root, not a task — except when a card was
+    // explicitly saved against it (a draft started on main). Dropping that card
+    // would hide a running agent, so it stays on the board while its worktree
+    // exists.
+    if (worktree.isMain && !existing) continue;
     const fanout = liveFanouts.find((item) => item.parentWorktreeId === worktree.id);
     const running = isWorktreeRunning(worktree.id, fanout, statuses);
     cards.push(

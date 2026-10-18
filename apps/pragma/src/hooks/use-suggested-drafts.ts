@@ -34,10 +34,36 @@ export interface SuggestedDraftsState {
   loading: boolean;
 }
 
+/** One provider's settled contribution, kept until the target changes. */
+interface ProviderResult {
+  suggestions: BoardSuggestion[];
+  notice: string | undefined;
+}
+
+/** Results tagged with the `project\0worktree` target they were fetched for. */
+interface LoadedSuggestions {
+  target: string | null;
+  suggestions: BoardSuggestion[];
+  notices: string[];
+  loading: boolean;
+}
+
+const IDLE: LoadedSuggestions = { target: null, suggestions: [], notices: [], loading: false };
+
+/** A value-stable identity for the fetch target, so a project switch invalidates results. */
+function suggestionTarget(project: PluginProject | null, worktree: ContextWorktree | null): string {
+  return `${project?.id ?? ""}\u0000${worktree?.id ?? ""}`;
+}
+
 /**
  * Collects suggested drafts from every provider for the active project. Each
- * provider is asked once per project/worktree and aborted when either changes;
- * a provider that raises a notice contributes that message instead of cards.
+ * provider is asked once per project/worktree and aborted when either changes; a
+ * provider that raises a notice contributes that message instead of cards.
+ *
+ * Results are published as each provider settles rather than waiting on
+ * `Promise.all`, so one slow provider cannot hold back the others, and the
+ * previous target's results are dropped the moment the project changes so they
+ * can never be picked or dismissed against the wrong project.
  */
 export function useSuggestedDrafts({
   isOpen,
@@ -52,50 +78,77 @@ export function useSuggestedDrafts({
 }): SuggestedDraftsState {
   const project = useStableProject(projectInput);
   const worktree = useStableWorktree(worktreeInput);
-  const [suggestions, setSuggestions] = useState<BoardSuggestion[]>([]);
-  const [notices, setNotices] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [state, setState] = useState<LoadedSuggestions>(IDLE);
 
   useEffect(() => {
     if (!isOpen || !project) {
-      setSuggestions([]);
-      setNotices([]);
-      setLoading(false);
+      setState(IDLE);
       return;
     }
+    const target = suggestionTarget(project, worktree);
     const controller = new AbortController();
-    setLoading(true);
+    const signal = controller.signal;
+    const results = new Map<string, ProviderResult>();
+    let remaining = providers.length;
+    // Drop the previous target's results immediately; they must not stay
+    // clickable while this target's fetch is still in flight.
+    setState({ target, suggestions: [], notices: [], loading: remaining > 0 });
+    const publish = () => {
+      if (signal.aborted) return;
+      const suggestions = providers.flatMap(
+        (provider) => results.get(provider.key)?.suggestions ?? [],
+      );
+      const notices = [
+        ...new Set(
+          providers.flatMap((provider) => {
+            const notice = results.get(provider.key)?.notice;
+            return notice ? [notice] : [];
+          }),
+        ),
+      ];
+      setState({ target, suggestions, notices, loading: remaining > 0 });
+    };
     const input = {
       project,
       worktree,
       limit: SUGGESTED_DRAFT_FETCH_LIMIT,
-      signal: controller.signal,
+      signal,
     };
-    void Promise.all(
-      providers.map((provider) =>
-        provider
-          .suggest(input)
-          .then((drafts) => ({ provider, drafts, notice: undefined }))
-          .catch((cause: unknown) => {
-            if (isSuggestedDraftProviderNotice(cause))
-              return { provider, drafts: [] as SuggestedDraft[], notice: cause.message };
-            console.warn(`suggested-draft provider ${provider.key} failed`, cause);
-            return { provider, drafts: [] as SuggestedDraft[], notice: undefined };
-          }),
-      ),
-    ).then((results) => {
-      if (controller.signal.aborted) return undefined;
-      setSuggestions(
-        results.flatMap(({ provider, drafts }) =>
-          drafts.map((draft) => ({ key: `${provider.key}:${draft.id}`, provider, draft })),
-        ),
-      );
-      setNotices([...new Set(results.flatMap(({ notice }) => (notice ? [notice] : [])))]);
-      setLoading(false);
-      return undefined;
-    });
+    for (const provider of providers) {
+      void (async () => {
+        try {
+          const drafts = await provider.suggest(input);
+          results.set(provider.key, {
+            suggestions: drafts.map((draft) => ({
+              key: `${provider.key}:${draft.id}`,
+              provider,
+              draft,
+            })),
+            notice: undefined,
+          });
+        } catch (cause) {
+          if (isSuggestedDraftProviderNotice(cause)) {
+            results.set(provider.key, { suggestions: [], notice: cause.message });
+            return;
+          }
+          console.warn(`suggested-draft provider ${provider.key} failed`, cause);
+          results.set(provider.key, { suggestions: [], notice: undefined });
+        } finally {
+          remaining -= 1;
+          publish();
+        }
+      })();
+    }
     return () => controller.abort();
   }, [isOpen, providers, project, worktree]);
 
-  return { suggestions, notices, loading };
+  // Never surface another target's results: while a switch is in flight the
+  // board sees an empty, loading list instead of the previous project's cards.
+  const target = isOpen && project ? suggestionTarget(project, worktree) : null;
+  const current = state.target === target ? state : null;
+  return {
+    suggestions: current?.suggestions ?? [],
+    notices: current?.notices ?? [],
+    loading: current ? current.loading : target !== null,
+  };
 }

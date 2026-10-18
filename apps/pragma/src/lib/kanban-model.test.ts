@@ -86,6 +86,14 @@ describe("live worktree board", () => {
     const draft = { ...saved, id: "draft", worktreeId: null, status: "draft" as const };
     expect(projectBoardCards([saved, draft], [main], [], [], [], {})).toEqual([draft]);
   });
+  it("keeps an explicitly saved card that a draft started on main", () => {
+    const onMain = { ...saved, worktreeId: "main", branchName: "main" };
+    expect(projectBoardCards([onMain], [main], [], [], [], {})).toMatchObject([
+      { worktreeId: "main", branchName: "main" },
+    ]);
+    // The root still stays off the board when no card was saved against it.
+    expect(projectBoardCards([], [main], [], [], [], {})).toEqual([]);
+  });
   it("waits for every ordinary agent to finish before review", () => {
     const done = { ...running, tabId: "done", status: "done" as const };
     expect(projectBoardCards([saved], [feature], [], [done, running], [], {})[0]?.status).toBe(

@@ -430,8 +430,8 @@ It sends the first user prompt, a differing latest follow-up, the last assistant
 recent tool names through `system1_agent_progress` (Rust adds the key, the activity verbs,
 and the progress levels from `CONSTANTS.system1.agentProgress`) to the `pragma-ai
 agent-progress` sidecar. An agent whose status disappears is forgotten, so its next prompt
-is a new task. The tracker is mounted once, in `ProjectSidebar`, and only runs while a
-System 1 key is configured.
+is a new task. The tracker is mounted once, in `WorkspaceShell` (not the sidebar, which the
+agent board and Settings replace), and only runs while a System 1 key is configured.
 
 **Git actions report like agents.** Wrap commit / push / PR / merge work in
 `trackWorktreeActivity(worktreeId, kind, work)` (`state/worktree-activity-store.ts`); the
@@ -1910,7 +1910,10 @@ only when a board action needs it. Strip `BoardCard`'s view-only fields before I
 
 `KanbanWorktreeDialog` reuses `TerminalView`, `PullRequestTab` (explicit worktree target),
 `ReviewTab`, and the full `FanoutComparison`; navigation back into the normal workspace
-must go through `openCardWorktree` to retain the return affordance. All live agent terminals
+must go through `openCardWorktree` to retain the return affordance. A fanout attempt's tab is
+host-created, so `openCardWorktree` restores it (`restoreFanoutTab`) before activating it when
+the desktop has not adopted it yet — the same sequence the sidebar's attempt rows use, shared
+in `lib/open-agent-tab.ts`. All live agent terminals
 in its list are visible hosts, not just the first one. `BoardAgentProgress` reuses the
 sidebar's System 1/Jev activity/progress rendering and puts it on the status-icon tooltip too.
 PR discovery is shared with sidebar rows through `hooks/use-worktree-pr-lifecycles.ts`.

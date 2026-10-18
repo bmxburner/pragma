@@ -241,9 +241,10 @@ export function KanbanWorktreeDialog({
   const workspace = useWorkspace();
   const kanban = useKanban();
   function navigate(worktreeId: string, tabId?: string | null, path?: string) {
+    // `openCardWorktree` restores and activates a host-created tab when needed,
+    // so only a file target needs its own activation here.
     kanban.openCardWorktree({ ...card, worktreeId, agentTabId: tabId ?? null });
     if (path) void workspace.openFileLocation({ projectId: card.projectId, worktreeId, path });
-    else if (tabId) void workspace.activateTabLocation(card.projectId, worktreeId, tabId);
     onClose();
   }
   return (
