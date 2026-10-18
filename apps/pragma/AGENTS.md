@@ -430,8 +430,8 @@ It sends the first user prompt, a differing latest follow-up, the last assistant
 recent tool names through `system1_agent_progress` (Rust adds the key, the activity verbs,
 and the progress levels from `CONSTANTS.system1.agentProgress`) to the `pragma-ai
 agent-progress` sidecar. An agent whose status disappears is forgotten, so its next prompt
-is a new task. The tracker is mounted once, in `ProjectSidebar`, and only runs while a
-System 1 key is configured.
+is a new task. The tracker is mounted once, in `WorkspaceShell` (not the sidebar, which the
+agent board and Settings replace), and only runs while a System 1 key is configured.
 
 **Git actions report like agents.** Wrap commit / push / PR / merge work in
 `trackWorktreeActivity(worktreeId, kind, work)` (`state/worktree-activity-store.ts`); the
@@ -1715,6 +1715,16 @@ so the editor shows only the user's text and a re-save does not re-fetch. Anythi
 displays a stored prompt (e.g. `KanbanCard`) shows `splitPromptContext(prompt).prompt`.
 Dialog tests share the textarea editor stub and a fake provider from `src/test/prompt-editor.tsx`.
 
+**Suggested drafts are the board's counterpart to the `@` picker.** `plugins/suggested-drafts.ts`
+binds `lib/builtin-suggested-drafts.ts` (a draft per open GitHub issue) plus plugin
+`suggestedDrafts` providers, and `hooks/use-suggested-drafts.ts` fetches them once per project
+against the project's main worktree. `ProjectKanbanWorkspace` renders them as dashed ghost
+cards under the real Drafts cards — 20 at a time behind **Load more** — hides any whose branch
+already exists, and records a dismissal in `BoardPreferences.dismissedSuggestions`
+(`providerKey:draftId`). Picking one opens `KanbanDraftDialog` with a `seed` (branch, prompt,
+agent); nothing is persisted until the user saves. The suggestion fetch keys on a value-stable
+project/worktree (`lib/stable-context-target.ts`, shared with `use-prompt-context`).
+
 Its **Fan out** mode is the same form with the single agent picker swapped for the
 repeatable attempt rows (`components/dialogs/FanoutRows.tsx`): branch name, display
 title, and prompt keep their meaning, and there is no attempt-count ceiling. A fanout
@@ -1883,9 +1893,11 @@ toolbar (`TerminalTabs`, between the Account providers menu and the editor launc
 replaced the new-session button). `state/kanban-context.tsx` (`useKanban`) is mounted in
 `App.tsx` **inside** `WorkspaceProvider` and is **always alive**, so it works in both
 shell modes. It owns a `mode: "normal" | "kanban" | "settings"` switch: `WorkspaceShell` renders
-`ProjectKanbanWorkspace` in place of the terminal `<section>` + right sidebar in agent-board
-mode (the **sidebar stays**). The agent board **replaces** the shell rather than overlaying it —
-native browser webviews (BrowserView) float above HTML, so an overlay would be clipped.
+`ProjectKanbanWorkspace` as a **full frame** in agent-board mode — the project sidebar is
+unmounted, and the board's own header (project name + **Exit agent board**) is the top-left
+window chrome, so it pads past the macOS traffic lights and doubles as the titlebar drag
+region. The agent board **replaces** the shell rather than overlaying it — native browser
+webviews (BrowserView) float above HTML, so an overlay would be clipped.
 The automations UI is not a shell mode: it renders as the **Automations** section of the
 full-frame Settings workspace (`AutomationsWorkspace embedded`), reachable via the native
 Settings menu or `openSettings("automations")`.
@@ -1898,12 +1910,41 @@ load by `selectedProjectId` and reload after every mutation. SDK callers create 
 with `client.createBoardDraft`; the brokered desktop controller resolves its worktree to
 the owning project/branch and emits `pragma:kanban-changed` for live reload.
 
-**Transitions are enforced, not free-form**: dragging a draft to In progress invokes the
-card's Start flow and moves it there optimistically while worktree creation runs (a failure
-returns it to Drafts); `inProgress → reviewNeeded` is **automatic** — `useKanban` listens to
-`onAgentReport` and moves a card whose `agentTabId` matches a `done` report (live
-attention/running is shown per card via `useTabAgentStatus`); `reviewNeeded → completed`
-only after a completion-modal action succeeds; completed cards are read-only.
+**The board projects live worktrees**, not just saved cards. `lib/kanban-model.ts` combines
+SQLite drafts/metadata with the workspace's current non-main worktrees, the complete agent
+status snapshot, and host fanouts. **Hidden worktrees are omitted**, the same rule the sidebar
+applies, so hiding one drops its card off the board (its session keeps running). A missing
+worktree is never resurrected by old card metadata. Running/attention agents take precedence over completion; ordinary idle work
+goes to Review needed, even with a PR open. Completed is explicit. `state/kanban-preferences.ts`
+holds project-scoped categories/assignments, saved draft attempt selectors,
+and manual column overrides, persisted as an opaque SQLite settings document through
+`read/write_kanban_preferences`. Its writes are serialized and edits wait for initial load;
+never store draft launch choices only in localStorage (UI overlay updates change origins).
+Review fixes hold In progress until manually moved; new
+ordinary runs reopen completed cards. Discovered worktrees materialize SQLite card metadata
+only when a board action needs it. Strip `BoardCard`'s view-only fields before IPC.
+
+`KanbanWorktreeDialog` reuses `TerminalView`, `PullRequestTab` (explicit worktree target),
+`ReviewTab`, and the full `FanoutComparison`; navigation back into the normal workspace
+must go through `openCardWorktree` to retain the return affordance. A fanout attempt's tab is
+host-created, so `openCardWorktree` restores it (`restoreFanoutTab`) before activating it when
+the desktop has not adopted it yet — the same sequence the sidebar's attempt rows use, shared
+in `lib/open-agent-tab.ts`. All live agent terminals
+in its list are visible hosts, not just the first one. `BoardAgentProgress` reuses the
+sidebar's System 1/Jev activity/progress rendering and puts it on the status-icon tooltip too.
+PR discovery is shared with sidebar rows through `hooks/use-worktree-pr-lifecycles.ts`.
+
+The draft dialog reuses `FanoutRows`. Starting a fanout calls the existing host create API;
+the board shows one parent card with nested attempts. Dragging it to Completed opens the
+regular comparison as a dialog, then the existing destructive pick confirmation. Once picked,
+the attempts disappear and the coordination parent becomes an ordinary card, followed by
+the normal completion choices. `FanoutsProvider` therefore wraps `KanbanProvider`.
+
+**Suggested drafts** appear at the bottom of the Drafts column as dashed ghost cards, one per
+provider suggestion (the built-in GitHub-issues source, plus any plugin's `suggestedDrafts`).
+They are not board items — not draggable, never in `kanban.cards` — and picking one only opens
+the draft dialog pre-filled through its `seed` prop; a dismissal is persisted in
+`BoardPreferences.dismissedSuggestions`. See _Suggested drafts are the board's counterpart_ above.
 
 **Background launch** (`startBackgroundAgentSession` in `lib/agent-launch.ts`) is the
 crux: starting a draft creates/reuses a worktree, creates a terminal tab, and spawns the
@@ -1915,11 +1956,14 @@ Sync / Create without syncing confirmation as `CreateWorktreeDialog`; failed sta
 fetches remain non-blocking so offline starts still work.
 
 **Completion** (`runCompletion`) reuses existing commands, never re-implements them.
-The board offers commit+PR = `aiCommitAllAndGeneratePullRequestDraft` →
+The board offers mark-completed, commit+PR = `aiCommitAllAndGeneratePullRequestDraft` →
 `githubPushBranch` → `createPullRequest` (records PR url/number, shown as a PR badge),
 or manual completion, which marks complete and navigates. The legacy `commitMerge`
 action remains readable/executable for persisted cards and API compatibility, but is
-not offered in the board UI.
+not offered in the board UI. The commit step is **skipped for a clean worktree**
+(`lib/commit-and-draft.ts`): a picked fanout's parent is already merged and committed
+by the host, so committing again would fail with "There are no changes to commit." — the
+PR is drafted from the branch's existing commits with `aiGeneratePullRequestDraft` instead.
 Card-driven navigation (`openCardWorktree`) switches to `mode: "normal"` and leaves a
 **Back to agent board** control in the shell; the board's own **Exit agent board** button just
 exits without that return affordance. The always-mounted `WorkspaceDialogs` hosts the

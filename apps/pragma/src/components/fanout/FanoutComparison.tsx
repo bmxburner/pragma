@@ -1,6 +1,14 @@
 import type { Fanout, FanoutMember, ScratchpadFile, Tab } from "@pragma-sh/constants";
 import { ChevronDown, ChevronRight, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  useContext,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { PickImplementationDialog } from "@/components/fanout/PickImplementationDialog";
 import { TerminalView } from "@/components/terminal/TerminalView";
@@ -32,7 +40,20 @@ import { FanoutDiffCell } from "./FanoutDiffCell";
  * One shared column model drives the sticky header and every section row.
  * Independent resizable groups per row drift apart the moment a row collapses.
  */
-export function FanoutComparison({ fanout }: { fanout: Fanout }) {
+type BoardNavigation = (worktreeId: string, tabId?: string | null, path?: string) => void;
+const BoardNavigationContext = createContext<BoardNavigation | undefined>(undefined);
+
+export function FanoutComparison({
+  fanout,
+  onClose,
+  onPicked,
+  onNavigate,
+}: {
+  fanout: Fanout;
+  onClose?: () => void;
+  onPicked?: () => void;
+  onNavigate?: BoardNavigation;
+}) {
   const fanouts = useFanouts();
   const members = useMemo(
     () => orderedMembers(fanout).filter((member) => member.worktreeId),
@@ -85,39 +106,42 @@ export function FanoutComparison({ fanout }: { fanout: Fanout }) {
   );
 
   return (
-    <section className="bg-canvas flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      <header className="flex h-9 shrink-0 items-center justify-between border-b border-sidebar-border px-3">
-        <span className="truncate text-sm font-medium">
-          Compare implementations · {fanout.title}
-        </span>
-        <Button size="sm" variant="ghost" onClick={fanouts.closeComparison}>
-          <X className="size-3.5" />
-          Exit compare
-        </Button>
-      </header>
-      <div ref={containerRef} className="min-h-0 flex-1 overflow-auto">
-        <div className="min-w-max">
-          <AttemptHeader
-            members={members}
-            template={template}
-            widths={widths}
-            onPick={setPicking}
-            onResize={handleResize}
-          />
-          <ScratchpadSection fanout={fanout} members={members} template={template} />
-          <SessionSection members={members} template={template} />
-          <CodeSection fanout={fanout} members={members} template={template} />
+    <BoardNavigationContext value={onNavigate}>
+      <section className="bg-canvas flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="flex h-9 shrink-0 items-center justify-between border-b border-sidebar-border px-3">
+          <span className="truncate text-sm font-medium">
+            Compare implementations · {fanout.title}
+          </span>
+          <Button size="sm" variant="ghost" onClick={onClose ?? fanouts.closeComparison}>
+            <X className="size-3.5" />
+            Exit compare
+          </Button>
+        </header>
+        <div ref={containerRef} className="min-h-0 flex-1 overflow-auto">
+          <div className="min-w-max">
+            <AttemptHeader
+              members={members}
+              template={template}
+              widths={widths}
+              onPick={setPicking}
+              onResize={handleResize}
+            />
+            <ScratchpadSection fanout={fanout} members={members} template={template} />
+            <SessionSection members={members} template={template} />
+            <CodeSection fanout={fanout} members={members} template={template} />
+          </div>
         </div>
-      </div>
-      {picking ? (
-        <PickImplementationDialog
-          fanout={fanout}
-          memberId={picking}
-          open
-          onOpenChange={(open) => !open && setPicking(null)}
-        />
-      ) : null}
-    </section>
+        {picking ? (
+          <PickImplementationDialog
+            fanout={fanout}
+            memberId={picking}
+            open
+            onOpenChange={(open) => !open && setPicking(null)}
+            onPicked={onPicked}
+          />
+        ) : null}
+      </section>
+    </BoardNavigationContext>
   );
 }
 
@@ -241,6 +265,7 @@ function ScratchpadSection({
   template: string;
 }) {
   const workspace = useWorkspace();
+  const navigate = useContext(BoardNavigationContext);
   const [collapsed, setCollapsed] = useState(false);
   const [rows, setRows] = useState<ScratchpadRow[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -302,7 +327,8 @@ function ScratchpadSection({
                               onClick={() => {
                                 // Editing happens in the attempt itself, in the
                                 // ordinary scratchpad editor.
-                                void workspace.selectWorktree(member.worktreeId!);
+                                if (navigate) navigate(member.worktreeId!, member.tabId);
+                                else void workspace.selectWorktree(member.worktreeId!);
                                 void openScratchpadTab(
                                   member.worktreeId!,
                                   file.filePath,
@@ -337,6 +363,7 @@ function ScratchpadSection({
  */
 function SessionSection({ members, template }: { members: FanoutMember[]; template: string }) {
   const workspace = useWorkspace();
+  const navigate = useContext(BoardNavigationContext);
   const worktreePath = useCallback(
     (worktreeId: string) =>
       Object.values(workspace.worktrees)
@@ -372,6 +399,15 @@ function SessionSection({ members, template }: { members: FanoutMember[]; templa
                 }`}
                 onFocusCapture={() => setFocused(member.id)}
               >
+                {navigate ? (
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    onClick={() => navigate(member.worktreeId!, member.tabId)}
+                  >
+                    Open worktree
+                  </Button>
+                ) : null}
                 {tab ? (
                   <TerminalView
                     active={focused === member.id}
@@ -402,6 +438,7 @@ function CodeSection({
   members: FanoutMember[];
   template: string;
 }) {
+  const navigate = useContext(BoardNavigationContext);
   const [collapsed, setCollapsed] = useState(false);
   const [pathsByMember, setPathsByMember] = useState<Map<string, string[]>>(new Map());
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -457,6 +494,15 @@ function CodeSection({
                   <div className="grid" style={{ gridTemplateColumns: template }}>
                     {members.map((member) => (
                       <div key={member.id} className="h-96 min-w-0 border-r border-border">
+                        {navigate && pathsByMember.get(member.id)?.includes(path) ? (
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            onClick={() => navigate(member.worktreeId!, null, path)}
+                          >
+                            {path}
+                          </Button>
+                        ) : null}
                         {pathsByMember.get(member.id)?.includes(path) ? (
                           <FanoutDiffCell
                             base={fanout.baseCommit}

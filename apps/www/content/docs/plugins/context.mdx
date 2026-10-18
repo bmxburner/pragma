@@ -74,3 +74,7 @@ interface ContextItem<TData = unknown> {
 
 `contextQuery`, `matchContextItems`, `formatPromptWithContext`, and its inverse `splitPromptContext` are exported too, so another
 client can reproduce the desktop's picker and prompt format exactly.
+
+To propose whole drafts for the agent board's Drafts column — rather than context for a
+prompt already being written — use
+[`defineSuggestedDraftProvider`](/docs/plugins/suggestions).

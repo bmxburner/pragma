@@ -519,11 +519,7 @@ function KanbanBoard({ className, asChild = false, children, ...props }: KanbanB
 
   return (
     <SortableContext items={columnIds} strategy={rectSortingStrategy}>
-      <Comp
-        data-slot="kanban-board"
-        className={cn("grid auto-rows-fr gap-4 sm:grid-cols-3", className)}
-        {...props}
-      >
+      <Comp data-slot="kanban-board" className={cn("grid gap-4", className)} {...props}>
         {children}
       </Comp>
     </SortableContext>

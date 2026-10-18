@@ -29,6 +29,7 @@ import { errorMessage } from "@/lib/errors";
 import { requestAddProject } from "@/lib/non-git-project";
 import { terminalManager } from "@/lib/terminal-manager";
 import { reloadWebview, restartServer } from "@/lib/troubleshooting";
+import { useAgentProgressTracking } from "@/state/agent-progress-store";
 import { useKanban } from "@/state/kanban-context";
 import { LeftSidebarProvider } from "@/state/left-sidebar-context";
 import { useOnboarding } from "@/state/onboarding-context";
@@ -267,6 +268,10 @@ export function WorkspaceShell() {
   const kanban = useKanban();
   const { creation } = useWorktreeCreation();
   const requestClose = useConfirmClose();
+  // Mounted in the shell, not the sidebar: the agent board and Settings replace
+  // the sidebar, and the tracker must keep listening to agent messages so the
+  // board's progress stays live while it is showing.
+  useAgentProgressTracking();
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandPaletteMode, setCommandPaletteMode] = useState<"search" | "command">("search");
   const openCommandPalette = (mode: "search" | "command") => {
@@ -302,22 +307,22 @@ export function WorkspaceShell() {
               className="bg-background flex h-full overflow-hidden text-foreground"
               onContextMenu={preventNativeContextMenu}
             >
-              {/* Settings mode takes the full frame. Agent board and normal shell
-              keep the project sidebar mounted. */}
+              {/* Settings and the agent board each take the full frame — the board
+              hides the project sidebar so its four columns own the whole window.
+              The normal shell keeps the sidebar mounted. Agent board mode replaces
+              the shell rather than overlaying it: native browser webviews float
+              above HTML, so an overlay would be clipped. */}
               {kanban.mode === "settings" ? (
                 <SettingsWorkspace />
+              ) : kanban.mode === "kanban" ? (
+                <ProjectKanbanWorkspace />
               ) : (
                 <>
                   <ProjectSidebar />
-                  {/* Agent board mode replaces the shell rather than overlaying it: native
-                  browser webviews float above HTML, so an overlay would be clipped.
-                  The sidebar stays; only the terminal/right-sidebar area is swapped. */}
                   {/* Creating a worktree takes over the same area for the same
                   reason: it is a full-frame loading screen, not an overlay. */}
                   {creation?.viewing ? (
                     <WorktreeCreationScreen />
-                  ) : kanban.mode === "kanban" ? (
-                    <ProjectKanbanWorkspace />
                   ) : (
                     <WorkspaceContent kanban={kanban} workspace={workspace} />
                   )}

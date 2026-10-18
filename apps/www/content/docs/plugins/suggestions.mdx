@@ -1,0 +1,71 @@
+---
+title: Suggested drafts
+description: defineSuggestedDraftProvider — propose pre-filled drafts for the agent board's Drafts column.
+---
+
+The agent board's **Drafts** column shows ghost cards proposed by suggested-draft
+providers. Pragma ships **GitHub issues**; a plugin adds more with
+`defineSuggestedDraftProvider`.
+
+```tsx
+import { definePlugin, defineSuggestedDraftProvider } from "@pragma-sh/plugin";
+
+export default definePlugin({
+  name: "linear",
+  suggestedDrafts: [
+    defineSuggestedDraftProvider({
+      id: "linear-issues",
+      title: "Linear issues",
+      iconPath: "./assets/linear.png", // or `icon: SomeIconComponent`
+      suggest: async ({ limit, signal }) => {
+        const issues = await fetchMyIssues({ signal });
+        return issues.slice(0, limit).map((issue) => ({
+          id: issue.id,
+          branchName: `eng-${issue.number}`,
+          title: `${issue.key} ${issue.title}`,
+          description: issue.title,
+          prompt: `Address Linear issue ${issue.key}: ${issue.title}\n\n${issue.description}`,
+          agentId: "claude", // optional: the dialog falls back to the project default
+        }));
+      },
+    }),
+  ],
+});
+```
+
+## How it runs
+
+- **`suggest`** runs once per project when the board opens, and again when the project
+  changes; `signal` is aborted between runs. Return a broad list — the board asks for at
+  most `limit` and paginates what you return behind **Load more**. A throwing provider is
+  skipped; the others still show.
+- It receives the active `project` and a representative `worktree` (the project's main
+  checkout), plus the usual plugin context (`config`, `sdk`, `notify`).
+- Picking a card opens the ordinary new-draft dialog **pre-filled** with `branchName`,
+  `prompt`, and `agentId`. The user reviews it; nothing is persisted until they save.
+- A suggestion whose `branchName` already matches a worktree is hidden, so accepting one
+  never duplicates an existing branch.
+- `when(ctx)` hides the provider for a project where it does not apply.
+- To show a message instead of cards — "Sign in to Linear to see suggestions" — throw
+  `new SuggestedDraftProviderNotice(message)` from `suggest`. The board shows each distinct
+  notice once; any other error is logged and hides the provider.
+
+## Shapes
+
+```ts
+interface SuggestedDraft<TData = unknown> {
+  id: string; // unique within the provider
+  branchName: string; // the prefilled draft's branch
+  prompt: string; // the prefilled draft's prompt
+  title?: string; // card label; falls back to branchName
+  description?: string; // secondary line on the card
+  icon?: PluginIcon;
+  iconPath?: string;
+  agentId?: string; // preferred agent; falls back to the project default
+  data?: TData; // JSON-serializable
+}
+```
+
+`SUGGESTED_DRAFT_PAGE_SIZE` is the board's page size (20). `SuggestedDraftProviderNotice`
+and `isSuggestedDraftProviderNotice` are exported so another client can reproduce the board
+exactly.

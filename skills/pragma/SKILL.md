@@ -13,20 +13,23 @@ Pragma is workspace for running persistent coding-agent sessions in isolated Git
 
 Use these user-facing terms:
 
-| Term           | Meaning                                                                  |
-| -------------- | ------------------------------------------------------------------------ |
-| **Project**    | Repository added to Pragma.                                              |
-| **Worktree**   | Isolated Git checkout and its tabs.                                      |
-| **Tab**        | Terminal, browser, editor, diff, review, log, scratchpad, or whiteboard. |
-| **Agent**      | Coding tool Pragma can launch and interact with.                         |
-| **Scratchpad** | Managed MDX document for agent-authored rich output and collaboration.   |
-| **Whiteboard** | Worktree-scoped Excalidraw canvas agents and users can create or revise. |
-| **Fanout**     | Same prompt run as isolated attempts, followed by selecting one result.  |
-| **Plugin**     | Trusted extension adding UI, commands, agents, themes, or integrations.  |
-| **Automation** | Trusted TypeScript/JavaScript task triggered by cron, event, or Run now. |
-| **Auto mode**  | System 1 model (Jev) picks agent, model, and effort for a launch prompt. |
+| Term            | Meaning                                                                          |
+| --------------- | -------------------------------------------------------------------------------- |
+| **Project**     | Repository added to Pragma.                                                      |
+| **Worktree**    | Isolated Git checkout and its tabs.                                              |
+| **Tab**         | Terminal, browser, editor, diff, review, log, scratchpad, or whiteboard.         |
+| **Agent**       | Coding tool Pragma can launch and interact with.                                 |
+| **Scratchpad**  | Managed MDX document for agent-authored rich output and collaboration.           |
+| **Whiteboard**  | Worktree-scoped Excalidraw canvas agents and users can create or revise.         |
+| **Fanout**      | Same prompt run as isolated attempts, followed by selecting one result.          |
+| **Agent board** | Project's live non-main worktrees plus prompt drafts, grouped by workflow state. |
+| **Plugin**      | Trusted extension adding UI, commands, agents, themes, or integrations.          |
+| **Automation**  | Trusted TypeScript/JavaScript task triggered by cron, event, or Run now.         |
+| **Auto mode**   | System 1 model (Jev) picks agent, model, and effort for a launch prompt.         |
 
 Auto mode follows the user's `automode.md` (`~/.pragma/automode.md`, overridden by `<project>/.pragma/automode.md`): YAML frontmatter `agents`/`models` `include`/`exclude` globs (`model` or `agent/model`) plus `priority` (`accuracy`, `speed`, `efficiency`, `balanced`), then free-text notes the System 1 model treats as the user's priorities. When a user asks to change how Auto picks, edit that file instead of changing their launches.
+
+The agent board follows live worktrees regardless of where they were created. Running agents move ordinary work to In progress; idle work, including open PRs, goes to Review needed. Completed is manual. Review fixes stay In progress until manually moved. Fanouts stay grouped until an attempt is picked; the winner is merged into the parent and attempts are removed. Board popups reuse real terminals, PR review, and fanout comparison; opening a worktree leaves a Back to agent board button. The Drafts column also shows plugin-suggested drafts (built-in GitHub issues plus plugin `suggestedDrafts`) as ghost cards; picking one pre-fills the draft dialog and nothing saves until submit. Categories are project-scoped, one per card, and stored on the desktop.
 
 Do not lead with servers, sockets, sidecars, protocol frames, Tauri, or crate names. Those describe implementation, not how agent or user gets work done.
 
