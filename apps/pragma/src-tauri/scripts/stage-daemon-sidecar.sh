@@ -55,6 +55,20 @@ for crate in "${rust_sidecars[@]}"; do
   cargo build -p "$crate" $cargo_profile_flag
 done
 
+# macOS: the linker gives a debug binary only a `linker-signed` ad hoc
+# signature, which System Settings silently refuses to add to Accessibility or
+# Screen Recording. Re-sign the computer-use helper ad hoc under its stable
+# identifier so a dev build can be granted. Only a fresh link is re-signed, so
+# an unchanged binary keeps its hash and its grant. Release bundles are signed
+# by the Tauri bundler instead.
+if [[ "$profile" == "debug" && "$(uname -s)" == "Darwin" ]]; then
+  helper="$repo_root/target/debug/pragma-computer"
+  if codesign -dv "$helper" 2>&1 | grep -q "linker-signed"; then
+    helper_id="$(sed -n 's/.*"macHelperBundleId": *"\([^"]*\)".*/\1/p' "$repo_root/packages/constants/values.json")"
+    codesign --force --sign - --identifier "$helper_id" "$helper"
+  fi
+fi
+
 # Bun-compiled sidecars: `<workspace filter>:<package dir>:<binary name>`.
 # A debug app runs several of these from source via `bun`, but the binary must
 # still exist so the Tauri CLI's externalBin copy step succeeds.

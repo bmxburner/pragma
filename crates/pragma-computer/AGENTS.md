@@ -58,8 +58,12 @@ exercise them by piping NDJSON into `target/debug/pragma-computer`, or through
 - macOS TCC identity: the helper re-runs itself with responsibility disclaimed
   (`macos/responsible.rs`), so Accessibility and Screen Recording attach to the
   `pragma-computer` binary itself — in dev, `target/debug/pragma-computer`, not
-  the app or terminal that started the chain. An ad-hoc-signed debug build is
-  identified by its hash, so a rebuild needs the grant re-added. Shipping it as
+  the app or terminal that started the chain. System Settings silently refuses a
+  `linker-signed` binary, so `stage-daemon-sidecar.sh` (run by `bun run dev`)
+  re-signs a freshly linked debug helper ad hoc as `macHelperBundleId`; after a
+  manual `cargo build` run
+  `codesign --force --sign - --identifier com.pragma.computer-use target/debug/pragma-computer`.
+  An ad hoc build is identified by its hash, so a rebuild needs the grant re-added. Shipping it as
   `Pragma Computer Use.app` (bundle id `constants.computer.macHelperBundleId`)
   for a named, stable identity is still planned.
 - Capture uses `xcap`'s deprecated `CGWindowListCreateImage`; ScreenCaptureKit is
