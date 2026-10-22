@@ -60,7 +60,8 @@ done
 # the list refuses it). Wrap the computer-use helper in a minimal app bundle
 # beside it, which `pragma-server` prefers (`helper_path`), and sign the bundle
 # ad hoc under the helper's bundle id. The bundle is rebuilt only when the
-# binary changed, so an unchanged helper keeps its hash and its grants.
+# binary's contents changed (a stamp of the source hash, since signing rewrites
+# the copy and mtimes drift), so an unchanged helper keeps its grants.
 if [[ "$profile" == "debug" && "$(uname -s)" == "Darwin" ]]; then
   values="$repo_root/packages/constants/values.json"
   helper_id="$(sed -n 's/.*"macHelperBundleId": *"\([^"]*\)".*/\1/p' "$values")"
@@ -68,7 +69,9 @@ if [[ "$profile" == "debug" && "$(uname -s)" == "Darwin" ]]; then
   helper="$repo_root/target/debug/pragma-computer"
   bundle="$repo_root/target/debug/$helper_app_name.app"
   bundled_helper="$bundle/Contents/MacOS/pragma-computer"
-  if [[ ! -f "$bundled_helper" || "$helper" -nt "$bundled_helper" ]]; then
+  stamp="$repo_root/target/debug/.pragma-computer-bundle.sha"
+  source_sha="$(shasum -a 256 "$helper" | cut -d' ' -f1)"
+  if [[ ! -f "$bundled_helper" || "$(cat "$stamp" 2>/dev/null)" != "$source_sha" ]]; then
     rm -rf "$bundle"
     mkdir -p "$bundle/Contents/MacOS"
     cp "$helper" "$bundled_helper"
@@ -87,6 +90,7 @@ if [[ "$profile" == "debug" && "$(uname -s)" == "Darwin" ]]; then
 </plist>
 PLIST
     codesign --force --sign - --identifier "$helper_id" "$bundle"
+    echo "$source_sha" >"$stamp"
     echo "bundled pragma-computer -> target/debug/$helper_app_name.app"
   fi
 fi
