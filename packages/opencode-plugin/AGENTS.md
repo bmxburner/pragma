@@ -1,8 +1,8 @@
 # packages/opencode-plugin — @pragma-sh/opencode-plugin
 
-ESM opencode plugin that reports agent status into Pragma. Built with Bunup
-(ESM-only). Imports opencode plugin types from `@opencode-ai/plugin`, reacts to
-opencode hooks/events, and reports `started` / `stopped` / `attention` / `cleared` /
+ESM opencode plugin that reports agent status into Pragma, for both OpenCode plugin
+APIs: v1 (`@opencode-ai/plugin`, `src/index.ts`) and v2 (`@opencode/plugin`, `src/v2/`).
+It reacts to opencode hooks/events and reports `started` / `stopped` / `attention` / `cleared` /
 `session-name` (the parent session's title from `session.created`/`session.updated`,
 deduplicated, so Pragma renames the hosting tab on create/rename/switch)
 through `@pragma-sh/sdk`.
@@ -13,12 +13,23 @@ through `@pragma-sh/sdk`.
 packages/opencode-plugin/
 ├── assets/                 # OpenCode brand assets used by plugin launcher
 ├── src/
-│   ├── index.ts             # PragmaOpencodePlugin entry point
-│   ├── hooks.ts             # Two-flag state machine (busy + attention)
-│   ├── pragma-plugin.ts     # Agent + watcher definition loaded by plugin sidecars
-│   └── usage-limits.ts      # OpenCode Go local cost-window aggregation
+│   ├── index.ts             # PragmaOpencodePlugin entry point (OpenCode v1 API)
+│   ├── v2/
+│   │   ├── index.ts         # PragmaOpencodeV2Plugin: no-op v2 server entry (required by the loader)
+│   │   ├── tui.ts           # PragmaOpencodeTuiPlugin: v2 TUI entry that reports status
+│   │   ├── id.ts            # Shared v2 plugin id
+│   │   └── events.ts        # v2 `{ type, data }` events → v1-shaped runtime events
+│   ├── hooks.ts             # Two-flag state machine (busy + attention), shared by both APIs
+│   ├── reporter.ts          # Pragma SDK reporter + plugin options, shared by both APIs
+│   ├── pragma-plugin.ts     # Agent + watcher + account definitions loaded by plugin sidecars
+│   ├── accounts.ts          # openCodeStoreAccount: v1 auth.json swap / v2 credential binding
+│   ├── opencode-version.ts  # isOpenCodeV2 (cached `opencode --version`)
+│   ├── opencode-api.ts      # `opencode api` calls into the v2 background service
+│   ├── host-shell.ts        # Host-shell quoting + `opencode` existence check (POSIX / PowerShell)
+│   └── usage-limits.ts      # OpenCode Go cost windows (v1 `opencode db`, v2 session stats)
 └── dist/
-    ├── index.mjs            # opencode status plugin (Bunup; git-ignored)
+    ├── index.mjs            # v1 status plugin (git-ignored)
+    ├── v2/                  # v2 plugin dir: index.mjs (server) + tui.mjs + package.json (git-ignored)
     └── pragma-plugin.mjs    # Agent/watcher bundle
 ```
 
@@ -27,7 +38,63 @@ The status plugin (`dist/index.mjs`) is registered in **opencode's own** `plugin
 `stage-daemon-sidecar.sh` stages it into app resources, and plugin sidecars import it for
 catalog and live watcher behavior.
 
+## OpenCode v2
+
+OpenCode v2 replaced the plugin API: a v1 plugin never runs under v2, and v2 reads the
+`plugins` config key (v1 reads `plugin`).
+
+**v2 status reporting runs in the TUI, never the server.** v2 server plugins load inside
+the shared `opencode serve --service` daemon: one process for every tab on the machine,
+started once (often by launchd, parent pid 1) and long outliving any tab. It has no
+`PRAGMA_TAB_ID` / gateway env, so a server-side reporter silently drops every report —
+and if a Pragma tab happened to start the service, it would report every tab's agent into
+that one tab. The TUI (`opencode` in the tab) is the process Pragma launched, so its env
+is right. A plugin directory therefore ships two entries:
+
+- `src/v2/index.ts` → `dist/v2/index.mjs`, the **server** entry. OpenCode refuses a
+  directory without one (`Plugin entrypoint not found`) and only finds the sibling TUI
+  entry through it. It deliberately does nothing.
+- `src/v2/tui.ts` → `dist/v2/tui.mjs`, the **TUI** entry (OpenCode probes `<dir>/tui`).
+  It imports `define` from `@opencode/plugin/tui/plugin` (the `tui` root pulls in Solid),
+  subscribes to `ctx.data.listen`, and feeds the shared state machine.
+
+The TUI's event feed is **not** limited to its own sessions, so `createSessionScope`
+claims a root session only once it is the routed session (`ui.router.current()`) or an
+open session tab (`ui.tabs.list()`), and children follow their root via
+`session.created`'s `parentID`. Without that, two OpenCode tabs report each other.
+
+There is **one state machine** for both APIs. `src/v2/events.ts` translates v2 events
+onto the v1 runtime-event shape `hooks.ts` consumes (`session.execution.*` → status/idle/
+error, `session.created` → child classification via `parentID`, `form.created` →
+`question.asked`, `session.text.*`/`session.reasoning.*` → part updates/deltas,
+`permission.asked` `{ action, resources }` → the fields `commandFromPermission` probes).
+A user `session.inbox.enqueued` item stands in for `chat.message`, and the cleanup
+`setup` returns stands in for `dispose`. There is no `shell.env` equivalent on v2: agent
+shells are spawned by the service, so they do not get the tab's `PRAGMA_*` env. Change
+status behavior in `hooks.ts`, never in the v2 adapter.
+
+Verified live against OpenCode 2.1.1 with `opencode --standalone` in a pty and a fake
+gateway: `cleared` on start, user message → `running` → assistant text → `done`, and
+`cleared` on exit, all carrying the TUI's tab id. A TUI picks up a rebuilt `tui.mjs` on
+its next launch; the server entry only reloads with `opencode service restart`.
+
+v2 questions arrive as forms (`form.created` / `form.replied` / `form.cancelled`); there
+is no `question.asked` event. The watcher still answers with TUI keystrokes, whose layout
+on v2's TUI is unverified.
+
 ## Installation
+
+**`scripts/install.mjs` selects the API.** It reads `opencode --version` (override with
+`PRAGMA_OPENCODE_PLUGIN_API=v1|v2`) and, for v1, registers the pinned package in `plugin`;
+for v2, registers this install's absolute `dist/v2` **directory** in `plugins`, because
+the package root is the v1 entry. v2 rejects a path to a file (`configured plugin path
+must be a directory` in `~/.local/share/opencode/log/opencode.log`) and loads the
+directory's `.` export, so the build's `scripts/stage-v2-package.mjs` writes
+`dist/v2/package.json`. A path plugin loads (`loading plugin … entrypoint=…` in that log)
+but does **not** appear in `opencode plugin list`, which lists package plugins only; the
+v2 background service (`opencode service restart`) loads plugins only when it starts. Each run removes every earlier entry of ours from both
+keys (package specifiers and paths to our bundles), so switching OpenCode versions means
+re-running the installer. A missing or unreadable `opencode` falls back to v1.
 
 **Pragma no longer auto-installs the opencode plugin** — the old
 `src-tauri/src/opencode_plugin.rs` installer was removed. Local development registers built
@@ -52,7 +119,10 @@ Status sends are serialized through one promise queue. OpenCode can invoke adjac
 event hooks concurrently; without serialization, a slow `started` HTTP request from an
 earlier turn could arrive after its `stopped` request and leave the tab incorrectly busy.
 
-Only root sessions feed normal status and transcript handling. `session.created` /
+Only root sessions feed normal status and transcript handling — **except prompts**.
+A subagent's `permission.asked` / `question.asked` (and the `question` tool hook) raise
+the same attention as the parent's, and their replies clear it: permission and question
+handlers run before child-session filtering, which used to swallow them silently. `session.created` /
 `session.updated` events identify subagent sessions by `info.parentID`; child lifecycle
 is tracked separately so a parent idle cannot report finished while any of its children
 remain active. Child classification survives partial `session.updated` payloads that omit
@@ -236,8 +306,13 @@ from the `provider` field or the `provider/model` id prefix. Fast variants stay 
 model entries when opencode exposes separate IDs. Reasoning is omitted unless opencode
 exposes reliable per-model reasoning levels.
 
-OpenCode Go usage comes from the supported `opencode db <query> --format json` command.
-The provider sums assistant-message costs whose provider is `opencode-go` against Go's
+OpenCode Go usage on **v1** comes from the supported `opencode db <query> --format json`
+command. **v2 dropped `opencode db`**: `loadOpenCodeGoUsageLimitsV2` instead asks the
+server's session statistics (`opencode api GET /api/experimental/session/stats?from=&to=`,
+one call per window, run concurrently) and sums the `opencode-go` models' `cost`. That
+endpoint is **experimental** — expect it to move. It returns aggregates only, so on v2 the
+5-hour window has no reset time; and v2 keeps one database for every account, so v2 usage is
+the device's OpenCode Go usage whichever key paid for it. The provider sums assistant-message costs whose provider is `opencode-go` against Go's
 documented $12/5-hour, $30/week, and $60/month limits. The 5-hour reset follows the first
 local message in the active rolling window; weekly reset is Monday UTC; monthly reset is
 the next UTC calendar month because OpenCode's local database does not expose the account's
@@ -253,11 +328,49 @@ and transport or parser failures throw so `agent verify` detects regressions.
 
 All providers are `agent: "opencode"`:
 
-- `opencode-go` — multi-account. Each account is an `XDG_DATA_HOME`, which moves `auth.json` **and the session database** — an account has its own session history, and the variable is visible to everything the agent's shell runs. Login is `opencode auth login` (interactive provider picker, answered through the sign-in dialog's paste field).
-- `openai` and `github-copilot` — multi-account by **swapping** (`credentialStoreAccount({ switchable: true })`, no `env`). They live in the **same** `auth.json` as OpenCode Go, so they cannot own a data directory: two providers setting `XDG_DATA_HOME` would fight at launch, and the server keeps only the first. Instead the server calls `swap.activate` before every launch, after the env is final, so the swap lands in whichever `auth.json` OpenCode will read (OpenCode Go's account directory included). Sign-in is in place: the new empty login is swapped in, then `opencode auth login` writes to the shared file. Login preselects the provider (`--provider openai --method "ChatGPT Pro/Plus (browser)"`; Copilot's deployment prompt is answered by `input: [""]`). OpenCode reads `auth.json` per request, so running sessions follow a switch. They declare no usage and no `iconPath`, so the merged row takes both from Codex / Copilot CLI. ChatGPT is shared with Codex, Pi and Prime Agent (kind `chatgpt`); Copilot only as `github-copilot:Ov23li8tweQw6odWQebz`, because OpenCode signs in to GitHub through its own OAuth app and no other harness uses it. Every API-key provider lends and takes its key (`credentialStoreAccount` defaults), and OpenCode Go's key is shared through `credentialFileSharedToken` from whichever data directory holds it. `OPENCODE_AUTH_CONTENT` was rejected: it replaces every credential, puts tokens in the environment, and a refresh writes the merged set back into the real `auth.json`.
+Every provider is built with `openCodeStoreAccount` (`src/accounts.ts`), which wraps
+`credentialStoreAccount({ switchable: true })` and asks `isOpenCodeV2` (a cached
+`opencode --version`) in every callback:
 
-`identify` reads the provider's entry in `auth.json` through `identifyFromCredentialStore` (`@pragma-sh/plugin`), because OpenCode exposes no command that reports the signed-in account. That is the one sanctioned read of the credential file: in the sidecar, identity only, never refreshed or rewritten. The usage rule above still stands — do not use the raw credentials to fetch usage. OpenAI is decoded offline from the ChatGPT JWT (id = email, matching Codex); Copilot calls `GET api.github.com/user` with the GitHub token (id = lowercased login); OpenCode Go is a SHA-256 digest of the key (`key:<16 hex>`), which merges with Pi and Prime Agent holding the same key.
+- **v1** — swap: the server calls `swap.activate` before every launch and the provider's
+  entries are swapped in and out of the one shared `auth.json`. OpenCode reads `auth.json`
+  per request, so running sessions follow a switch.
+- **v2** — OpenCode keeps accounts in its own database (`opencode auth list` / `switch`), and
+  `auth.json` is only imported once. A Pragma login is bound to **one v2 credential labelled
+  `pragma:<loginId>`**; `activate` calls `POST /api/credential/<id>/activate` through
+  `opencode api`, and OpenCode refreshes the credential itself, so Pragma never mirrors a
+  rotating token. The harness's own sign-in is the integration's unlabelled credential. A new
+  login signs in in place: `activate` finds no bound credential, records the existing ids in
+  `<home>/opencode/pragma-v2-pending.json`, `opencode auth login` adds and activates a new one,
+  and the next `identify` claims (relabels) the credential that is not in that snapshot.
+  Credential values are mapped to the `auth.json` entry shape (`credentialEntry`) so the
+  shared identity and token helpers stay the single derivation.
+- **v2 cannot borrow a sign-in** (`sharedToken.write` throws; `read` still lends). Creating a
+  credential would put its secret in the `opencode api -d` argument — `opencode api` reads a
+  body from neither stdin nor a file (`-d @file` and `-d -` are taken literally) — where
+  other local users can read it. Only label-only bodies go on that command line.
 
-- `OPENCODE_API_KEY_PROVIDERS` — `modelsDevAccountProviders(["openai", "opencode-go"])` from `@pragma-sh/plugin`: every other provider OpenCode holds a key for (Anthropic, Google Gemini API, xAI, OpenCode Zen, OpenRouter, DeepSeek, Groq, Mistral, Cerebras, Fireworks, Together, Hugging Face, NVIDIA, Vercel AI Gateway, Z.ai, MiniMax, Kimi Code, Moonshot AI Platform, Xiaomi MiMo), each mapped to its `auth.json` entry ids (models.dev ids, most specific first). Built with `credentialStoreAccount`: single-login like `openai`, `apiKeyOnly: true`, and login is `opencode auth login --provider <first entry>`, which prompts for the key. Providers without a plain key in `auth.json` (Bedrock, Azure, Vertex, Cloudflare) are left out. The toolbar menu hides one until OpenCode is signed in to it; Add account still lists it.
+**OpenCode Go no longer has an `XDG_DATA_HOME` per account.** v2 serves every OpenCode
+process from one background service, and `XDG_DATA_HOME` only moves the CLI's own paths
+(`opencode debug paths`) while `opencode api` still reaches the shared service and its
+credentials — verified. It therefore switches like the others; a server ignores `swap`
+whenever `env` is set, so it could not keep both. Existing logins carry over, because the swap
+reads a login's saved entries from `<home>/opencode/auth.json`, exactly where `env` stored
+them. On v1 the trade-off is that its accounts now share one session history.
+
+**Login is bare `opencode auth login`** (the provider picker), with instructions naming what
+to pick: v1 preselects with `--provider`, v2 with a positional target, each rejects the
+other's form, and Pragma types the command into the user's shell (POSIX or PowerShell), so a
+version check there is not portable. OpenAI and Copilot declare no usage and no `iconPath`, so
+the merged row takes both from Codex / Copilot CLI. ChatGPT is shared with Codex, Pi and
+Prime Agent (kind `chatgpt`); Copilot only as `github-copilot:Ov23li8tweQw6odWQebz`, because
+OpenCode signs in to GitHub through its own OAuth app and no other harness uses it. Every
+API-key provider lends and takes its key on v1. `OPENCODE_AUTH_CONTENT` was rejected: it
+replaces every credential, puts tokens in the environment, and a refresh writes the merged
+set back into the real `auth.json`.
+
+`identify` reads the provider's entry in `auth.json` (v1) or its bound credential from `GET /api/credential` (v2), because OpenCode exposes no command that reports the signed-in account. That is the one sanctioned read of the credential store: in the sidecar, identity only, never refreshed or rewritten. The usage rule above still stands — do not use the raw credentials to fetch usage. OpenAI is decoded offline from the ChatGPT JWT (id = email, matching Codex); Copilot calls `GET api.github.com/user` with the GitHub token (id = lowercased login); OpenCode Go is a SHA-256 digest of the key (`key:<16 hex>`), which merges with Pi and Prime Agent holding the same key.
+
+- `OPENCODE_API_KEY_PROVIDERS` — `modelsDevAccountProviders(["openai", "opencode-go"])` from `@pragma-sh/plugin`: every other provider OpenCode holds a key for (Anthropic, Google Gemini API, xAI, OpenCode Zen, OpenRouter, DeepSeek, Groq, Mistral, Cerebras, Fireworks, Together, Hugging Face, NVIDIA, Vercel AI Gateway, Z.ai, MiniMax, Kimi Code, Moonshot AI Platform, Xiaomi MiMo), each mapped to its `auth.json` entry ids (models.dev ids, most specific first). Built with `openCodeStoreAccount`, switchable like `openai`, `apiKeyOnly: true`; login is the bare picker, then a key prompt. Providers without a plain key in `auth.json` (Bedrock, Azure, Vertex, Cloudflare) are left out. The toolbar menu hides one until OpenCode is signed in to it; Add account still lists it.
 
 **Only add a provider whose credential may be used outside its own first-party harness.** Claude Free/Pro/Max OAuth is restricted by Anthropic's terms to Claude Code and claude.ai, and Google suspends accounts that use Gemini CLI or Antigravity OAuth in other tools — so in any other harness, Anthropic and Google are API-key only (`apiKeyOnly: true`), and their OAuth sign-ins are never identified or presented as accounts. ChatGPT (Codex OAuth) and GitHub Copilot sign-ins are sanctioned in OpenCode and Pi. That is why Anthropic is key-only here even though OpenCode 1.18 no longer ships Claude OAuth: a stale or plugin-written OAuth entry must still not be shown.

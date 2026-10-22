@@ -71,10 +71,10 @@ you. Pragma stores the path to the token, never the token itself.
 | Codex          | OpenAI                    | Yes (`CODEX_HOME`)                           |
 | GitHub Copilot | GitHub Copilot            | Yes (`COPILOT_HOME`)                         |
 | Grok           | xAI                       | Yes (`GROK_HOME`)                            |
-| OpenCode       | OpenCode Go               | Yes (`XDG_DATA_HOME`)                        |
-| OpenCode       | OpenAI                    | Yes (swaps its `auth.json`)                  |
-| OpenCode       | GitHub Copilot            | Yes (swaps its `auth.json`)                  |
-| OpenCode       | API-key providers (below) | Its own sign-in (`opencode auth login`)      |
+| OpenCode       | OpenCode Go               | Yes (switches its sign-in)                   |
+| OpenCode       | OpenAI                    | Yes (switches its sign-in)                   |
+| OpenCode       | GitHub Copilot            | Yes (switches its sign-in)                   |
+| OpenCode       | API-key providers (below) | Yes (switches its sign-in)                   |
 | Pi             | OpenAI                    | Yes (swaps its `auth.json`)                  |
 | Pi             | Anthropic                 | API key only, in Pi                          |
 | Pi             | GitHub Copilot            | Its own sign-in (`/login` in Pi)             |
@@ -87,8 +87,7 @@ you. Pragma stores the path to the token, never the token itself.
 | Junie          | JetBrains                 | One login, signed in from Junie              |
 
 A harness's existing sign-in (for example `~/.claude`) shows up automatically as its
-default account. An OpenCode account keeps its own session history, because OpenCode stores
-sessions beside its credentials.
+default account.
 
 ### One sign-in, several harnesses
 
@@ -98,24 +97,26 @@ sign-in, so if Codex and Pi are both signed in to the same ChatGPT account, it a
 under both harnesses, and its usage comes from Codex. A provider that only a multi-provider
 harness uses shows the account but no usage.
 
-These harnesses keep every provider's sign-in in one `auth.json`, next to their sessions and
-extensions, so Pragma cannot give one provider a directory of its own. For **ChatGPT** (OpenCode,
-Pi, Prime Agent) and **GitHub Copilot** (OpenCode) it switches accounts by **swapping** that
-provider's entry in the shared file when the harness starts instead:
+These harnesses keep every provider's sign-in in one shared store, so Pragma cannot give one
+provider a directory of its own. It switches accounts when the harness starts instead: for
+**ChatGPT** (OpenCode, Pi, Prime Agent) and every **OpenCode** provider. Pi, Prime Agent and
+OpenCode 1 swap that provider's entry in their `auth.json`; OpenCode 2 keeps several accounts
+itself (`opencode auth list`), so Pragma just tells it which one is active.
 
 - **Add another account** from the harness's picker: Pragma sets your current sign-in aside, runs
   the harness's login (`opencode auth login`, or `/login` typed into Pi or Prime Agent for you),
   and saves whatever you sign in to as a new account. Cancel and your previous sign-in comes
   straight back.
-- **Switching** works like any other harness. The next launch writes the chosen account in and
-  saves the one it replaces, including any token the harness refreshed in the meantime. Every
-  other provider in the file is left alone.
+- **Switching** works like any other harness. The next launch makes the chosen account active
+  and keeps the one it replaces, including any token the harness refreshed in the meantime.
+  Every other provider is left alone. In OpenCode 2, accounts Pragma added are labelled
+  `pragma:…` in `opencode auth switch`.
 - **Running sessions switch too**, because they read the same file. The harness's picker says so.
 - **One sign-in is enough.** An account signed in through one harness appears in the other
   harnesses' dropdowns as _Uses its existing sign-in_ (or _API key_), and picking it copies it
   over — no browser. See [Sharing a sign-in](#sharing-a-sign-in-between-harnesses) below.
-- OpenCode Go still uses a separate data directory per account. When it is on an account you
-  added in Pragma, the swap applies to that directory's `auth.json`.
+- **OpenCode 2 cannot take a copied sign-in yet**, only lend its own: add the account with
+  **Add account** instead. OpenCode Go accounts no longer get separate session histories.
 
 ### Sharing a sign-in between harnesses
 
@@ -147,8 +148,8 @@ Together AI, Hugging Face, NVIDIA, Vercel AI Gateway, Z.ai, MiniMax, Kimi Code, 
 Platform and Xiaomi MiMo. A key is identified by a digest, never stored, so the same key in
 two harnesses is one account. These rows show no usage.
 
-Sign OpenCode in from **Add account** (it runs `opencode auth login` for that provider; paste
-the key into the field). Pi and Prime Agent read keys from their own `auth.json`. Kimi Code
+Sign OpenCode in from **Add account** (it runs `opencode auth login`; pick the provider, then
+paste the key into the field). Pi and Prime Agent read keys from their own `auth.json`. Kimi Code
 reads the providers you imported with `kimi provider catalog add <id> --api-key …`; one you
 gave a custom name is not recognized.
 
