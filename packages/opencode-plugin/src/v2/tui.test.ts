@@ -27,6 +27,7 @@ type Route = { type: "home" } | { type: "session"; sessionID: string };
 /** A minimal TUI context: a routed session, a session tree, and a pushable event feed. */
 function fakeContext(options: { route: Route; parents?: Record<string, string>; tabs?: string[] }) {
   let listener: ((event: { details: Event }) => void) | undefined;
+  let route = options.route;
   const parents = options.parents ?? {};
   const root = (id: string): string => (parents[id] ? root(parents[id]) : id);
   const ctx = {
@@ -39,7 +40,7 @@ function fakeContext(options: { route: Route; parents?: Record<string, string>; 
       session: { root },
     },
     ui: {
-      router: { current: () => options.route },
+      router: { current: () => route },
       tabs: {
         enabled: () => options.tabs !== undefined,
         list: () => (options.tabs ?? []).map((sessionID) => ({ sessionID })),
@@ -51,11 +52,28 @@ function fakeContext(options: { route: Route; parents?: Record<string, string>; 
     emit: (...events: Event[]) => {
       for (const event of events) listener?.({ details: event });
     },
+    setRoute: (next: Route) => {
+      route = next;
+    },
   };
 }
 
 function attentionKinds(): unknown[] {
   return sdkMocks.reportAttention.mock.calls.map((call) => (call[0] as { kind: string }).kind);
+}
+
+/** A queued user prompt. Events run in order, so once its message is reported the ones before it are done. */
+function prompt(sessionID: string, text: string): Event {
+  return {
+    type: "session.inbox.enqueued",
+    data: { sessionID, inboxID: `msg_${text}`, item: { type: "user", payload: { text } } },
+  };
+}
+
+function messageTexts(): unknown[] {
+  return sdkMocks.reportMessage.mock.calls.map(
+    (call) => (call[0] as { message: { text?: string } }).message.text,
+  );
 }
 
 beforeEach(() => {
@@ -134,6 +152,64 @@ describe("PragmaOpencodeTuiPlugin", () => {
     emit({ type: "session.execution.started", data: { sessionID: "ses_tab" } });
     await vi.waitFor(() => expect(sdkMocks.reportStarted).toHaveBeenCalledTimes(1));
     await (cleanup as () => Promise<void>)();
+  });
+
+  it("keeps one session's completion from reporting another running tab as finished", async () => {
+    const { ctx, emit } = fakeContext({ route: { type: "home" }, tabs: ["ses_a", "ses_b"] });
+    const cleanup = await PragmaOpencodeTuiPlugin.setup(ctx);
+    emit(
+      { type: "session.execution.started", data: { sessionID: "ses_a" } },
+      { type: "session.execution.started", data: { sessionID: "ses_b" } },
+      { type: "session.execution.succeeded", data: { sessionID: "ses_a" } },
+      prompt("ses_b", "after"),
+    );
+    await vi.waitFor(() => expect(messageTexts()).toContain("after"));
+    expect(sdkMocks.reportStopped).not.toHaveBeenCalled();
+
+    emit({ type: "session.execution.succeeded", data: { sessionID: "ses_b" } });
+    await vi.waitFor(() => expect(sdkMocks.reportStopped).toHaveBeenCalledTimes(1));
+    await (cleanup as () => Promise<void>)();
+  });
+
+  it("keeps another tab's pending prompt when a different session errors", async () => {
+    const { ctx, emit } = fakeContext({ route: { type: "home" }, tabs: ["ses_a", "ses_b"] });
+    const cleanup = await PragmaOpencodeTuiPlugin.setup(ctx);
+    emit(
+      { type: "session.execution.started", data: { sessionID: "ses_b" } },
+      {
+        type: "permission.asked",
+        data: { id: "per_1", sessionID: "ses_a", action: "bash", resources: ["rm -rf dist"] },
+      },
+      { type: "session.execution.failed", data: { sessionID: "ses_b", error: {} } },
+      { type: "session.execution.started", data: { sessionID: "ses_b" } },
+      prompt("ses_b", "after"),
+    );
+    await vi.waitFor(() => expect(messageTexts()).toContain("after"));
+
+    // ses_a's approval is still pending, so ses_b's turns must not re-report the tab.
+    expect(attentionKinds()).toEqual(["command"]);
+    expect(sdkMocks.reportStarted).toHaveBeenCalledTimes(1);
+    await (cleanup as () => Promise<void>)();
+    expect(sdkMocks.reportStopped).not.toHaveBeenCalled();
+  });
+
+  it("stops reporting a session once this TUI no longer shows it", async () => {
+    const { ctx, emit, setRoute } = fakeContext({ route: { type: "session", sessionID: "ses_a" } });
+    const cleanup = await PragmaOpencodeTuiPlugin.setup(ctx);
+    emit({ type: "session.execution.started", data: { sessionID: "ses_a" } });
+    await vi.waitFor(() => expect(sdkMocks.reportStarted).toHaveBeenCalledTimes(1));
+
+    // The session is closed here while it keeps running, as when it is resumed in another TUI.
+    setRoute({ type: "home" });
+    sdkMocks.reportCleared.mockClear();
+    emit({
+      type: "permission.asked",
+      data: { id: "per_1", sessionID: "ses_a", action: "bash", resources: ["ls"] },
+    });
+    await vi.waitFor(() => expect(sdkMocks.reportCleared).toHaveBeenCalled());
+    await (cleanup as () => Promise<void>)();
+
+    expect(attentionKinds()).toEqual([]);
   });
 
   it("clears the indicator when the TUI exits", async () => {

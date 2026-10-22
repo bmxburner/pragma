@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -59,6 +59,14 @@ const provider = openCodeStoreAccount({
   entries: ["opencode-go"],
 });
 
+/** A Pragma login's home holding one pre-v2 `auth.json` entry for `opencode-go`. */
+async function legacyHome(entry: Record<string, unknown>): Promise<string> {
+  const home = await mkdtemp(join(tmpdir(), "opencode-v1-login-"));
+  await mkdir(join(home, "opencode"), { recursive: true });
+  await writeFile(join(home, "opencode", "auth.json"), JSON.stringify({ "opencode-go": entry }));
+  return home;
+}
+
 function accountCtx(
   host: ReturnType<typeof fakeV2Host>,
   account: { loginId: string; home: string | null },
@@ -115,6 +123,30 @@ describe("OpenCode v2 accounts", () => {
     expect(host.credentials.find((credential) => credential.id === "cred_own")?.label).toBe(
       "API key",
     );
+  });
+
+  it("binds a login saved before OpenCode 2 to the v2 copy of its key", async () => {
+    const home = await legacyHome({ type: "api", key: "legacy-key" });
+    const host = fakeV2Host([
+      keyCredential("cred_own", "own-key", "API key", true),
+      keyCredential("cred_legacy", "legacy-key", "API key", false),
+    ]);
+    const ctx = accountCtx(host, { loginId: "login-4", home });
+
+    expect(await provider.identify?.(ctx)).toEqual(await apiKeyIdentity("legacy-key"));
+    expect(host.credentials.find((credential) => credential.id === "cred_legacy")?.label).toBe(
+      "pragma:login-4",
+    );
+  });
+
+  it("asks a login saved before OpenCode 2 to sign in again rather than use another account", async () => {
+    const home = await legacyHome({ type: "api", key: "gone-key" });
+    const host = fakeV2Host([keyCredential("cred_own", "own-key", "API key", true)]);
+    const ctx = accountCtx(host, { loginId: "login-5", home });
+
+    await expect(provider.swap?.activate(ctx)).rejects.toThrow(/Sign in again/);
+    expect(host.calls.some((command) => command.includes("/activate"))).toBe(false);
+    expect(await provider.identify?.(ctx)).toBeNull();
   });
 
   it("lends a login's key but refuses to borrow one", async () => {

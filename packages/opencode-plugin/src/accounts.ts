@@ -31,6 +31,8 @@ const PRAGMA_LABEL_PREFIX = "pragma:";
 /** Snapshot left in a new login's home while it signs in, naming the credentials that predate it. */
 const PENDING_FILE = "opencode/pragma-v2-pending.json";
 const SAFE_ID = /^[A-Za-z0-9_-]+$/;
+const SIGN_IN_AGAIN_MESSAGE =
+  "This login was saved before OpenCode 2 and its sign-in is not in OpenCode 2's store. Sign in again to use it.";
 
 /** One OpenCode v2 credential, as `GET /api/credential` returns it. */
 export interface V2Credential {
@@ -110,12 +112,40 @@ function v2Callbacks(options: CredentialStoreAccountOptions) {
     );
   }
 
-  /** The credential a login is bound to, claiming the one a new login just created. */
+  /** The entries a login saved before OpenCode 2 keeps in its own `auth.json`, by integration. */
+  async function legacyEntries(
+    home: string,
+  ): Promise<Array<{ integrationID: string; entry: Record<string, unknown> }>> {
+    const file = await readCredentialFile(`${home}/${options.store.file}`);
+    return options.entries.flatMap((integrationID) => {
+      const entry = file?.[integrationID];
+      return isRecord(entry) ? [{ integrationID, entry }] : [];
+    });
+  }
+
+  async function relabel(
+    ctx: AccountContext,
+    credential: V2Credential,
+    label: string,
+  ): Promise<V2Credential> {
+    await openCodeApi(ctx, "PATCH", `/api/credential/${safeId(credential.id)}`, { label });
+    return { ...credential, label };
+  }
+
+  /**
+   * The credential a login is bound to: its labelled one, else the one a new
+   * login just created, else the v2 copy of a login saved before OpenCode 2.
+   */
   async function bound(ctx: AccountContext): Promise<V2Credential | null> {
     const all = await credentials(ctx);
-    if (ctx.account.home === null) return harnessCredential(all);
+    const home = ctx.account.home;
+    if (home === null) return harnessCredential(all);
     const label = loginLabel(ctx.account.loginId);
-    return all.find((credential) => credential.label === label) ?? (await claimNew(ctx, all));
+    return (
+      all.find((credential) => credential.label === label) ??
+      (await claimNew(ctx, all)) ??
+      (await adoptLegacy(ctx, all, home))
+    );
   }
 
   /** Labels the credential created since this login started signing in. */
@@ -130,10 +160,33 @@ function v2Callbacks(options: CredentialStoreAccountOptions) {
         credential.active && !known.has(credential.id) && !isPragmaLabel(credential.label),
     );
     if (!created) return null;
-    const label = loginLabel(ctx.account.loginId);
-    await openCodeApi(ctx, "PATCH", `/api/credential/${safeId(created.id)}`, { label });
+    const claimed = await relabel(ctx, created, loginLabel(ctx.account.loginId));
     await writeCredentialFile(`${home}/${PENDING_FILE}`, {});
-    return { ...created, label };
+    return claimed;
+  }
+
+  /**
+   * Binds a login saved before OpenCode 2, whose key sits in its own `auth.json`,
+   * to the v2 credential holding that same secret, when OpenCode has imported it.
+   * The harness's own sign-in is never taken, so the login cannot steal it.
+   */
+  async function adoptLegacy(
+    ctx: AccountContext,
+    all: V2Credential[],
+    home: string,
+  ): Promise<V2Credential | null> {
+    const own = harnessCredential(all);
+    for (const { integrationID, entry } of await legacyEntries(home)) {
+      const match = all.find(
+        (credential) =>
+          credential.id !== own?.id &&
+          credential.integrationID === integrationID &&
+          !isPragmaLabel(credential.label) &&
+          sameSecret(entry, credential),
+      );
+      if (match) return relabel(ctx, match, loginLabel(ctx.account.loginId));
+    }
+    return null;
   }
 
   return {
@@ -149,6 +202,11 @@ function v2Callbacks(options: CredentialStoreAccountOptions) {
       // credential itself; remember what existed so `identify` can claim it.
       const home = ctx.account.home;
       if (home !== null) {
+        // Without a bound credential, OpenCode would activate its default instead
+        // and this login would silently use another account. Ask for a sign-in.
+        if ((await legacyEntries(home)).length > 0) {
+          throw new Error(SIGN_IN_AGAIN_MESSAGE);
+        }
         const all = await credentials(ctx);
         await writeCredentialFile(`${home}/${PENDING_FILE}`, {
           known: all.map((entry) => entry.id),
@@ -221,6 +279,18 @@ export function credentialEntry(credential: V2Credential): Record<string, unknow
 function harnessCredential(all: V2Credential[]): V2Credential | null {
   const own = all.filter((credential) => !isPragmaLabel(credential.label));
   return own.find((credential) => credential.active) ?? own[0] ?? null;
+}
+
+/** Whether a pre-v2 `auth.json` entry and a v2 credential hold the same secret. */
+function sameSecret(entry: Record<string, unknown>, credential: V2Credential): boolean {
+  const { value } = credential;
+  if (entry.type === "api") return value.type === "key" && value.key === entry.key;
+  if (entry.type === "oauth") return value.type === "oauth" && value.refresh === entry.refresh;
+  return false;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function isPragmaLabel(label: string): boolean {

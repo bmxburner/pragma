@@ -17,6 +17,7 @@ packages/opencode-plugin/
 │   ├── v2/
 │   │   ├── index.ts         # PragmaOpencodeV2Plugin: no-op v2 server entry (required by the loader)
 │   │   ├── tui.ts           # PragmaOpencodeTuiPlugin: v2 TUI entry that reports status
+│   │   ├── session-statuses.ts # One state machine per root session, folded into the tab's status
 │   │   ├── id.ts            # Shared v2 plugin id
 │   │   └── events.ts        # v2 `{ type, data }` events → v1-shaped runtime events
 │   ├── hooks.ts             # Two-flag state machine (busy + attention), shared by both APIs
@@ -59,9 +60,17 @@ is right. A plugin directory therefore ships two entries:
   subscribes to `ctx.data.listen`, and feeds the shared state machine.
 
 The TUI's event feed is **not** limited to its own sessions, so `createSessionScope`
-claims a root session only once it is the routed session (`ui.router.current()`) or an
-open session tab (`ui.tabs.list()`), and children follow their root via
-`session.created`'s `parentID`. Without that, two OpenCode tabs report each other.
+only accepts a root session while it is the routed session (`ui.router.current()`) or an
+open session tab (`ui.tabs.list()`), checked on every event; children follow their root
+via `session.created`'s `parentID`. Without that, two OpenCode tabs report each other. A
+root the TUI stops showing is released on its next event: its state machine is disposed
+and its part of the tab's status clears. The TUI API has no route or tab change event, so
+that release is lazy.
+
+One TUI feeds several session tabs, so each root session gets **its own** `hooks.ts` state
+machine (`session-statuses.ts`), and the tab reports the combined state: attention (the
+most recent prompt) > started > stopped > cleared. A shared machine would let one session's
+completion report another's running turn as finished.
 
 There is **one state machine** for both APIs. `src/v2/events.ts` translates v2 events
 onto the v1 runtime-event shape `hooks.ts` consumes (`session.execution.*` → status/idle/
@@ -343,6 +352,10 @@ Every provider is built with `openCodeStoreAccount` (`src/accounts.ts`), which w
   login signs in in place: `activate` finds no bound credential, records the existing ids in
   `<home>/opencode/pragma-v2-pending.json`, `opencode auth login` adds and activates a new one,
   and the next `identify` claims (relabels) the credential that is not in that snapshot.
+  A login saved before OpenCode 2 (its key still in `<home>/opencode/auth.json`) binds to the
+  v2 credential holding the same secret when OpenCode imported it; with no match, `activate`
+  refuses and asks for a sign-in again, because OpenCode would otherwise activate its default
+  account and the login would silently use another one.
   Credential values are mapped to the `auth.json` entry shape (`credentialEntry`) so the
   shared identity and token helpers stay the single derivation.
 - **v2 cannot borrow a sign-in** (`sharedToken.write` throws; `read` still lends). Creating a
