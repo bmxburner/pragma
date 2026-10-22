@@ -122,9 +122,7 @@ fn running_app(app: Option<&str>, pid: Option<u64>) -> ComputerResult<Running> {
 }
 
 fn frontmost_pid() -> Option<i32> {
-    objc2_app_kit::NSWorkspace::sharedWorkspace()
-        .frontmostApplication()
-        .map(|app| app.processIdentifier())
+    apps::frontmost_pid()
 }
 
 /// Brings `app` to the front and waits until it is.

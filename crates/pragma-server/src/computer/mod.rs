@@ -172,6 +172,7 @@ pub struct ComputerService {
     session_grants: Mutex<HashSet<String>>,
     shots: Mutex<VecDeque<(String, ComputerPoint, f64)>>,
     home: Option<PathBuf>,
+    screenshots_dir: PathBuf,
 }
 
 impl ComputerService {
@@ -216,6 +217,7 @@ impl ComputerService {
             session_grants: Mutex::new(HashSet::new()),
             shots: Mutex::new(VecDeque::new()),
             home,
+            screenshots_dir: server_dir.join(&CONSTANTS.computer.screenshots_directory),
         })
     }
 
@@ -228,7 +230,28 @@ impl ComputerService {
                 return;
             };
             service.sweep_idle(now_ms());
+            service.sweep_screenshots(std::time::SystemTime::now());
         });
+    }
+
+    /// Deletes screenshots older than the shipped TTL. Callers that need one
+    /// longer copy it out (or pass `--out`).
+    fn sweep_screenshots(&self, now: std::time::SystemTime) {
+        let ttl = Duration::from_millis(CONSTANTS.computer.screenshot_ttl_ms.get());
+        let Ok(entries) = std::fs::read_dir(&self.screenshots_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let expired = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age > ttl);
+            if expired {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
     }
 
     fn settings(&self) -> ComputerUseSettings {

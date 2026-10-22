@@ -544,7 +544,6 @@
       2000,
       5000
     ],
-    "pipWindowLabelPrefix": "computer-pip-",
     "blockedApps": [
       "mac:com.apple.keychainaccess",
       "mac:com.apple.securityagent",
@@ -663,7 +662,7 @@
         "op": "move",
         "mutating": true,
         "lease": false,
-        "inputLock": "always",
+        "inputLock": "pointer",
         "desktopOnly": false
       },
       {

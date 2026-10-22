@@ -9,7 +9,6 @@ import { isMacPlatform } from "@/lib/platform";
 import "@/plugins/bootstrap-bridge";
 import "@/lib/brand-icons";
 import "./index.css";
-import { ComputerPip } from "@/components/computer-use/ComputerPip";
 import { CursorOverlay } from "@/components/computer-use/CursorOverlay";
 import { MiniApp } from "@/components/mini/MiniApp";
 import { parseComputerWindowRoute } from "@/lib/computer-window";
@@ -18,7 +17,7 @@ import App from "./App.tsx";
 
 /** A Pragma Mini window runs the same bundle and renders its own lean root. */
 const isMiniWindow = isMiniWindowLabel(getCurrentWindow().label);
-/** So do the computer-use picture-in-picture and cursor overlay windows. */
+/** So does each computer-use cursor overlay window (one per display). */
 const computerRoute = parseComputerWindowRoute(window.location.hash);
 
 // macOS gets a native NSVisualEffectView behind the window plus inset traffic
@@ -62,7 +61,6 @@ if (!isMiniWindow && !computerRoute) {
 }
 
 function Root() {
-  if (computerRoute?.kind === "pip") return <ComputerPip worktreeId={computerRoute.worktreeId} />;
   if (computerRoute?.kind === "overlay") return <CursorOverlay origin={computerRoute.origin} />;
   return isMiniWindow ? <MiniApp /> : <App />;
 }

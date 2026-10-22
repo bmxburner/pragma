@@ -3,12 +3,11 @@
 //! The local host's `pragma-server` owns sessions, leases, policy, and the
 //! native helper. This module forwards the desktop user's own requests (always
 //! attributed as `user`, so approvals and the stop can only come from here),
-//! bridges the `computerActivity` stream into the webviews, and owns the
-//! windows that make control visible: one transparent, click-through overlay
-//! per display that draws the agent cursor, and one picture-in-picture window
-//! per worktree. Overlays exist exactly while a session is live; the picture-in-picture
-//! window is
-//! shown and hidden by the main window, which knows the selected worktree.
+//! bridges the `computerActivity` stream into the webviews, and owns the one
+//! kind of window that must live outside the app: a transparent,
+//! click-through overlay per display that draws the agent cursor over other
+//! apps. Overlays exist exactly while a session is live. The
+//! picture-in-picture view is an in-app panel in the main window, not a window.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -20,10 +19,7 @@ use pragma_constants::{
 };
 use pragma_protocol::{read_frame, write_json_frame, EventFrame, Frame, ServerFrame};
 use serde_json::{json, Value};
-use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, WebviewUrl,
-    WebviewWindowBuilder,
-};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::error::{AppError, AppResult};
 use crate::hosts::Hosts;
@@ -33,23 +29,6 @@ use crate::pty::PtyClient;
 const ACTIVITY_EVENT: &str = "pragma:computer";
 /// Label prefix of the per-display cursor overlays.
 const OVERLAY_PREFIX: &str = "computer-overlay-";
-/// The picture-in-picture window's compact and expanded sizes, in logical points.
-const PIP_SIZE: (f64, f64) = (320.0, 236.0);
-const PIP_EXPANDED: (f64, f64) = (760.0, 520.0);
-
-fn pip_label(worktree_id: &str) -> String {
-    let safe: String = worktree_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("{}{safe}", CONSTANTS.computer.pip_window_label_prefix)
-}
 
 fn app_url(app: &AppHandle, fragment: &str) -> WebviewUrl {
     crate::updates::active_ui_overlay_url(app).map_or_else(
@@ -75,146 +54,6 @@ pub fn computer_rpc(hosts: State<'_, Hosts>, mut payload: Value) -> AppResult<Va
     }
     payload["caller"] = json!({ "kind": "user", "label": "You" });
     hosts.local().rpc(ProtocolRpcMethod::Computer, payload)
-}
-
-/// Shows (creating if needed) the picture-in-picture window for a worktree's session.
-#[tauri::command]
-pub fn computer_pip_show(app: AppHandle, worktree_id: String) -> AppResult<()> {
-    let label = pip_label(&worktree_id);
-    if let Some(window) = app.get_webview_window(&label) {
-        window.show().map_err(tauri_error)?;
-        return Ok(());
-    }
-    let builder = WebviewWindowBuilder::new(&app, &label, app_url(&app, &format!("computer-pip={worktree_id}")))
-        .title("Computer use")
-        .inner_size(PIP_SIZE.0, PIP_SIZE.1)
-        .min_inner_size(240.0, 160.0)
-        .resizable(true)
-        .decorations(false)
-        .transparent(true)
-        .shadow(true)
-        .always_on_top(true)
-        .visible_on_all_workspaces(true)
-        .skip_taskbar(true)
-        .focused(false)
-        // Keeps the window out of every screenshot, ours included, so it never
-        // ends up in what an agent reads back.
-        .content_protected(true)
-        .disable_drag_drop_handler();
-    let window = builder.build().map_err(tauri_error)?;
-    place_pip(&window);
-    Ok(())
-}
-
-/// Hides a worktree's picture-in-picture window without ending anything.
-#[tauri::command]
-pub fn computer_pip_hide(app: AppHandle, worktree_id: String) -> AppResult<()> {
-    if let Some(window) = app.get_webview_window(&pip_label(&worktree_id)) {
-        window.hide().map_err(tauri_error)?;
-    }
-    Ok(())
-}
-
-/// Closes a worktree's picture-in-picture window (its session ended).
-#[tauri::command]
-pub fn computer_pip_close(app: AppHandle, worktree_id: String) -> AppResult<()> {
-    if let Some(window) = app.get_webview_window(&pip_label(&worktree_id)) {
-        window.close().map_err(tauri_error)?;
-    }
-    Ok(())
-}
-
-/// Expands the picture-in-picture window onto the display the agent cursor is on, centred on the
-/// cursor's last position, or shrinks it back to its corner.
-#[tauri::command]
-pub fn computer_pip_expand(
-    app: AppHandle,
-    worktree_id: String,
-    expanded: bool,
-    cursor: Option<(f64, f64)>,
-) -> AppResult<()> {
-    let window = app
-        .get_webview_window(&pip_label(&worktree_id))
-        .ok_or_else(|| {
-            AppError::InvalidInput("that picture-in-picture window is not open".to_string())
-        })?;
-    if !expanded {
-        window
-            .set_size(LogicalSize::new(PIP_SIZE.0, PIP_SIZE.1))
-            .map_err(tauri_error)?;
-        place_pip(&window);
-        return Ok(());
-    }
-    window
-        .set_size(LogicalSize::new(PIP_EXPANDED.0, PIP_EXPANDED.1))
-        .map_err(tauri_error)?;
-    if let Some((x, y)) = cursor {
-        let monitor = window.available_monitors().ok().and_then(|monitors| {
-            monitors.into_iter().find(|monitor| {
-                let scale = monitor.scale_factor();
-                let position = monitor.position().to_logical::<f64>(scale);
-                let size = monitor.size().to_logical::<f64>(scale);
-                x >= position.x
-                    && y >= position.y
-                    && x < position.x + size.width
-                    && y < position.y + size.height
-            })
-        });
-        let (left, top) = monitor.map_or(
-            (x - PIP_EXPANDED.0 / 2.0, y - PIP_EXPANDED.1 / 2.0),
-            |monitor| {
-                let scale = monitor.scale_factor();
-                let position = monitor.position().to_logical::<f64>(scale);
-                let size = monitor.size().to_logical::<f64>(scale);
-                (
-                    (x - PIP_EXPANDED.0 / 2.0)
-                        .clamp(position.x, position.x + size.width - PIP_EXPANDED.0),
-                    (y - PIP_EXPANDED.1 / 2.0)
-                        .clamp(position.y, position.y + size.height - PIP_EXPANDED.1),
-                )
-            },
-        );
-        window
-            .set_position(LogicalPosition::new(left, top))
-            .map_err(tauri_error)?;
-    }
-    window.show().map_err(tauri_error)?;
-    Ok(())
-}
-
-/// Puts the compact picture-in-picture window in the bottom-right of a display other than the main
-/// window's when there is one, so it does not cover the app being driven.
-fn place_pip(window: &tauri::WebviewWindow) {
-    let main = window
-        .app_handle()
-        .get_webview_window(crate::mini_window::MAIN_WINDOW_LABEL);
-    let main_monitor = main
-        .as_ref()
-        .and_then(|main| main.current_monitor().ok().flatten());
-    let monitors = window.available_monitors().unwrap_or_default();
-    let target = monitors
-        .iter()
-        .find(|monitor| {
-            main_monitor
-                .as_ref()
-                .is_some_and(|main| main.name() != monitor.name())
-        })
-        .or(main_monitor.as_ref())
-        .or_else(|| monitors.first());
-    if let Some(monitor) = target {
-        let scale = monitor.scale_factor();
-        let position = monitor.position().to_logical::<f64>(scale);
-        let size = monitor.size().to_logical::<f64>(scale);
-        let margin = 24.0;
-        let _ = window.set_position(LogicalPosition::new(
-            position.x + size.width - PIP_SIZE.0 - margin,
-            position.y + size.height - PIP_SIZE.1 - margin - 48.0,
-        ));
-    }
-}
-
-fn tauri_error(error: tauri::Error) -> AppError {
-    AppError::InvalidInput(error.to_string())
 }
 
 /// Starts the activity bridge for the local host and registers the
@@ -286,8 +125,8 @@ fn sync_overlays(app: &AppHandle, wanted: bool, open: &AtomicBool) {
     if wanted == open.load(Ordering::SeqCst) {
         return;
     }
-    open.store(wanted, Ordering::SeqCst);
     if !wanted || !cursor_enabled(app) {
+        open.store(false, Ordering::SeqCst);
         for (label, window) in app.webview_windows() {
             if label.starts_with(OVERLAY_PREFIX) {
                 let _ = window.close();
@@ -305,6 +144,10 @@ fn sync_overlays(app: &AppHandle, wanted: bool, open: &AtomicBool) {
         .ok()
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_default();
+    // Marked open only once there is something to draw on: a failed display
+    // read (the helper restarting) is retried on the next event instead of
+    // leaving the session without a cursor.
+    open.store(!displays.is_empty(), Ordering::SeqCst);
     for (index, display) in displays.iter().enumerate() {
         let label = format!("{OVERLAY_PREFIX}{index}");
         let fragment = format!(
@@ -384,13 +227,6 @@ pub fn emergency_stop(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pip_labels_are_safe_window_labels() {
-        let label = pip_label("wt:1/2");
-        assert!(label.starts_with(CONSTANTS.computer.pip_window_label_prefix.as_str()));
-        assert!(!label.contains(':') && !label.contains('/'));
-    }
 
     #[test]
     fn display_ids_are_url_safe() {

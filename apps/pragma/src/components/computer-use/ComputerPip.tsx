@@ -1,15 +1,18 @@
-import { useEffect, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Maximize2, Minimize2, Minus, MousePointer2, Pause, Play, Square } from "lucide-react";
 import { toast } from "sonner";
 
 import type { ComputerScreenshot, ComputerSession } from "@pragma-sh/constants";
 
-import { NO_WORKTREE_PIP } from "@/components/computer-use/ComputerUseController";
 import { IconButton } from "@/components/ui/icon-button";
 import { errorMessage } from "@/lib/errors";
-import { computerPipExpand, computerRpc } from "@/lib/tauri";
+import { computerRpc } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
+import {
+  minimizeComputerPip,
+  revealComputerPip,
+  useComputerPipMinimized,
+} from "@/state/computer-pip-store";
 import {
   controlledApps,
   controlSession,
@@ -17,47 +20,68 @@ import {
   type ComputerCursor,
 } from "@/state/computer-use-store";
 
-/** Frame refresh while the window is visible. */
+/** Frame refresh while the panel is visible. */
 const FRAME_INTERVAL_MS = 500;
 /** How much the expanded view zooms in around the agent cursor. */
 const FOLLOW_ZOOM = 2;
+/** Panel sizes in CSS pixels. */
+const COMPACT = { width: 320, height: 236 };
+const EXPANDED = { width: 720, height: 480 };
+/** Distance kept from the window edges. */
+const MARGIN = 16;
 
 /**
- * The picture-in-picture window for one worktree's computer-use session: a
- * live view of the app the agent is driving, who is driving it, what it is
- * doing, and the controls to pause or stop it.
+ * The in-app picture-in-picture panel for the selected worktree's
+ * computer-use sessions: a live view of the app an agent is driving, who is
+ * driving it, what it is doing, and the controls to pause or stop it.
  *
- * The window is always on top and draggable by its header. Minimize sends it
- * to the Dock; Expand grows it onto the display the agent cursor is on and
- * follows the cursor, zoomed in, so the user can see exactly where the agent
- * is working. It is excluded from screen capture, so it never shows up in
- * what an agent reads back.
+ * It floats inside the Pragma window only — never as a separate OS window —
+ * and can be dragged anywhere in it by its header. Minimize collapses it to a
+ * pill (the sidebar badge brings it back); Expand enlarges it and zooms the
+ * view onto the agent cursor, following it as it moves.
  */
-export function ComputerPip({ worktreeId }: { worktreeId: string }) {
-  const { snapshot, cursors } = useComputerUse();
-  const sessions = (snapshot?.sessions ?? []).filter((session) =>
-    worktreeId === NO_WORKTREE_PIP ? !session.worktreeId : session.worktreeId === worktreeId,
-  );
+export function ComputerPip({ sessions }: { sessions: ComputerSession[] }) {
+  const { cursors } = useComputerUse();
+  const minimized = useComputerPipMinimized();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const session = sessions.find((s) => s.id === selectedId) ?? sessions[0] ?? null;
   const cursor = session ? cursors[session.id] : undefined;
   const [expanded, setExpanded] = useState(false);
-  const frame = useFrame(session?.id ?? null, expanded ? 1280 : 480, cursor?.pulses ?? 0);
+  const size = expanded ? EXPANDED : COMPACT;
+  const { position, startDrag } = useDraggable(size);
+  const frame = useFrame(
+    minimized ? null : (session?.id ?? null),
+    expanded ? 1280 : 480,
+    cursor?.pulses ?? 0,
+  );
 
-  const toggleExpanded = () => {
-    const next = !expanded;
-    setExpanded(next);
-    const point = cursor ? ([cursor.point.x, cursor.point.y] as [number, number]) : null;
-    void computerPipExpand(worktreeId, next, point).catch((error: unknown) =>
-      toast.error(errorMessage(error)),
+  if (!session) return null;
+  if (minimized) {
+    return (
+      <button
+        className="fixed right-4 bottom-4 z-50 flex max-w-72 items-center gap-2 rounded-full border bg-background px-3 py-1.5 text-xs shadow-lg"
+        data-testid="computer-pip-pill"
+        onClick={revealComputerPip}
+        type="button"
+      >
+        <MousePointer2 className="size-3.5 shrink-0 animate-pulse text-primary" />
+        <span className="truncate">
+          {session.owner.label ?? "Agent"} · {controlledApps(session)}
+        </span>
+      </button>
     );
-  };
+  }
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden rounded-xl border bg-background text-foreground">
+    <div
+      className="fixed z-50 flex flex-col overflow-hidden rounded-xl border bg-background text-foreground shadow-2xl transition-[width,height] duration-200"
+      data-testid="computer-pip"
+      style={{ left: position.x, top: position.y, width: size.width, height: size.height }}
+    >
       <PipHeader
         expanded={expanded}
-        onExpand={toggleExpanded}
+        onExpand={() => setExpanded((value) => !value)}
+        onPointerDown={startDrag}
         session={session}
         sessions={sessions}
         setSelectedId={setSelectedId}
@@ -67,10 +91,10 @@ export function ComputerPip({ worktreeId }: { worktreeId: string }) {
           <PipFrame cursor={cursor} follow={expanded} frame={frame} />
         ) : (
           <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-            {session ? "Waiting for the first frame…" : "No agent is using the computer."}
+            Waiting for the first frame…
           </div>
         )}
-        {session?.paused ? (
+        {session.paused ? (
           <div className="absolute inset-x-0 bottom-0 bg-warning/90 px-3 py-1 text-center text-xs font-medium text-background">
             Paused — you're in control
           </div>
@@ -79,43 +103,104 @@ export function ComputerPip({ worktreeId }: { worktreeId: string }) {
       <div className="flex items-center gap-2 border-t px-3 py-1.5 text-xs">
         <MousePointer2 className="size-3 shrink-0 text-primary" />
         <span className="min-w-0 flex-1 truncate">
-          {cursor?.description ?? session?.lastDescription ?? "Idle"}
+          {cursor?.description ?? session.lastDescription ?? "Idle"}
         </span>
-        {session ? (
-          <span className="shrink-0 text-muted-foreground">{session.actionCount} steps</span>
-        ) : null}
+        <span className="shrink-0 text-muted-foreground">{session.actionCount} steps</span>
       </div>
     </div>
   );
 }
 
+/**
+ * Keeps the panel inside the window: it starts in the bottom-right corner,
+ * follows the pointer while its header is dragged, and is clamped back in
+ * whenever its size or the window changes.
+ */
+function useDraggable(size: { width: number; height: number }) {
+  const [position, setPosition] = useState(() => cornerPosition(size));
+  const drag = useRef<{ dx: number; dy: number } | null>(null);
+
+  useEffect(() => {
+    const clamp = () => setPosition((current) => clampPosition(current, size));
+    clamp();
+    window.addEventListener("resize", clamp);
+    return () => window.removeEventListener("resize", clamp);
+  }, [size]);
+
+  const startDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest("button")) return;
+    drag.current = { dx: event.clientX - position.x, dy: event.clientY - position.y };
+    const move = (moveEvent: PointerEvent) => {
+      const offset = drag.current;
+      if (!offset) return;
+      setPosition(
+        clampPosition({ x: moveEvent.clientX - offset.dx, y: moveEvent.clientY - offset.dy }, size),
+      );
+    };
+    const up = () => {
+      drag.current = null;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  return { position, startDrag };
+}
+
+function cornerPosition(size: { width: number; height: number }) {
+  return clampPosition(
+    { x: window.innerWidth - size.width - MARGIN, y: window.innerHeight - size.height - MARGIN },
+    size,
+  );
+}
+
+/** Keeps a panel of `size` at `point` fully inside the window. */
+export function clampPosition(
+  point: { x: number; y: number },
+  size: { width: number; height: number },
+  bounds = { width: window.innerWidth, height: window.innerHeight },
+): { x: number; y: number } {
+  const maxX = Math.max(MARGIN, bounds.width - size.width - MARGIN);
+  const maxY = Math.max(MARGIN, bounds.height - size.height - MARGIN);
+  return {
+    x: Math.min(Math.max(point.x, MARGIN), maxX),
+    y: Math.min(Math.max(point.y, MARGIN), maxY),
+  };
+}
+
 function PipHeader({
   expanded,
   onExpand,
+  onPointerDown,
   session,
   sessions,
   setSelectedId,
 }: {
   expanded: boolean;
   onExpand: () => void;
-  session: ComputerSession | null;
+  onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  session: ComputerSession;
   sessions: ComputerSession[];
   setSelectedId: (id: string) => void;
 }) {
   const run = (op: "pause" | "unpause" | "stop") => {
-    if (!session) return;
     void controlSession(op, session.id).catch((error: unknown) => toast.error(errorMessage(error)));
   };
   return (
-    <div className="flex h-9 shrink-0 items-center gap-1 border-b px-2" data-tauri-drag-region>
-      <div className="min-w-0 flex-1 truncate text-xs" data-tauri-drag-region>
+    <div
+      className="flex h-9 shrink-0 cursor-grab touch-none items-center gap-1 border-b px-2 select-none active:cursor-grabbing"
+      onPointerDown={onPointerDown}
+    >
+      <div className="min-w-0 flex-1 truncate text-xs">
         {sessions.length > 1 ? (
           <span className="flex gap-1">
             {sessions.map((s) => (
               <button
                 className={cn(
                   "truncate rounded px-1.5 py-0.5",
-                  s.id === session?.id ? "bg-muted font-medium" : "text-muted-foreground",
+                  s.id === session.id ? "bg-muted font-medium" : "text-muted-foreground",
                 )}
                 key={s.id}
                 onClick={() => setSelectedId(s.id)}
@@ -125,31 +210,24 @@ function PipHeader({
               </button>
             ))}
           </span>
-        ) : session ? (
-          <span data-tauri-drag-region>
+        ) : (
+          <span>
             <span className="font-medium">{session.owner.label ?? "Agent"}</span>
             <span className="text-muted-foreground"> · {controlledApps(session)}</span>
           </span>
-        ) : null}
+        )}
       </div>
-      {session?.paused ? (
+      {session.paused ? (
         <IconButton label="Resume" onClick={() => run("unpause")} size="icon-xs" variant="ghost">
           <Play />
         </IconButton>
       ) : (
-        <IconButton
-          disabled={!session}
-          label="Pause"
-          onClick={() => run("pause")}
-          size="icon-xs"
-          variant="ghost"
-        >
+        <IconButton label="Pause" onClick={() => run("pause")} size="icon-xs" variant="ghost">
           <Pause />
         </IconButton>
       )}
       <IconButton
         className="text-destructive"
-        disabled={!session}
         label="Stop"
         onClick={() => run("stop")}
         size="icon-xs"
@@ -165,12 +243,7 @@ function PipHeader({
       >
         {expanded ? <Minimize2 /> : <Maximize2 />}
       </IconButton>
-      <IconButton
-        label="Minimize"
-        onClick={() => void getCurrentWindow().minimize()}
-        size="icon-xs"
-        variant="ghost"
-      >
+      <IconButton label="Minimize" onClick={minimizeComputerPip} size="icon-xs" variant="ghost">
         <Minus />
       </IconButton>
     </div>

@@ -1,15 +1,15 @@
 import { MousePointer2 } from "lucide-react";
 
 import { IconButton } from "@/components/ui/icon-button";
-import { computerPipShow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
+import { revealComputerPip } from "@/state/computer-pip-store";
 import { controlledApps, sessionsForWorktree, useComputerUse } from "@/state/computer-use-store";
 
 /**
  * The sidebar's "an agent is controlling your computer" badge on a worktree
  * row. It pulses while an action is in flight and turns amber while an
- * approval is waiting; clicking it brings the worktree's picture-in-picture
- * window back.
+ * approval is waiting; clicking it selects the worktree and brings the
+ * computer-use panel back if it was minimized.
  */
 export function ComputerUseIndicator({ worktreeId }: { worktreeId: string }) {
   const { snapshot, cursors } = useComputerUse();
@@ -37,10 +37,9 @@ export function ComputerUseIndicator({ worktreeId }: { worktreeId: string }) {
       )}
       data-testid="computer-use-indicator"
       label={label}
-      onClick={(event) => {
-        event.stopPropagation();
-        void computerPipShow(worktreeId);
-      }}
+      // The click also reaches the row, which selects the worktree, so the
+      // revealed panel shows this worktree's session.
+      onClick={revealComputerPip}
       size="icon-xs"
       variant="ghost"
     >

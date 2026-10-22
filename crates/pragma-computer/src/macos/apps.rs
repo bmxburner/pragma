@@ -21,10 +21,9 @@ pub struct Running {
 
 /// Regular running apps.
 pub fn running() -> Vec<Running> {
+    super::ffi::pump_run_loop();
     let workspace = NSWorkspace::sharedWorkspace();
-    let frontmost = workspace
-        .frontmostApplication()
-        .map(|app| app.processIdentifier());
+    let frontmost = frontmost_pid();
     workspace
         .runningApplications()
         .iter()
@@ -57,6 +56,24 @@ pub fn running() -> Vec<Running> {
             }
         })
         .collect()
+}
+
+/// The frontmost app's pid.
+///
+/// `NSWorkspace` only keeps `frontmostApplication` current for a process with
+/// a running app event loop, which this helper does not have, so it can be
+/// stale or empty. The Window Server's list is always current: its first
+/// normal-layer window belongs to the frontmost app.
+pub fn frontmost_pid() -> Option<i32> {
+    super::ffi::window_list()
+        .into_iter()
+        .find(|window| window.layer == 0 && window.w > 1.0 && window.h > 1.0)
+        .map(|window| window.pid)
+        .or_else(|| {
+            NSWorkspace::sharedWorkspace()
+                .frontmostApplication()
+                .map(|app| app.processIdentifier())
+        })
 }
 
 /// The stable id of an app.

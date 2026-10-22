@@ -282,3 +282,17 @@ pub fn window_list() -> Vec<WindowInfo> {
         })
         .collect()
 }
+
+/// Delivers pending run-loop work without waiting.
+///
+/// The helper has no app event loop, and `NSWorkspace` learns about launched,
+/// quit, and activated apps through run-loop notifications; without a pump its
+/// app list freezes at first use. One non-blocking pass before each query
+/// keeps it current.
+pub fn pump_run_loop() {
+    use objc2_core_foundation::{kCFRunLoopDefaultMode, CFRunLoop};
+    // SAFETY: reading an immutable CoreFoundation constant that is valid for
+    // the life of the process.
+    let mode = unsafe { kCFRunLoopDefaultMode };
+    let _ = CFRunLoop::run_in_mode(mode, 0.0, false);
+}

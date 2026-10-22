@@ -6009,7 +6009,6 @@
         "typeChunkUnits",
         "cursorLeadMs",
         "helperRestartBackoffMs",
-        "pipWindowLabelPrefix",
         "blockedApps",
         "sensitiveLabels",
         "commands"
@@ -6112,10 +6111,6 @@
             "minimum": 0
           },
           "description": "Delays between helper restarts after a crash. After the last one the helper is reported unavailable."
-        },
-        "pipWindowLabelPrefix": {
-          "type": "string",
-          "description": "Window label prefix that routes a desktop window to the computer-use picture-in-picture view."
         },
         "blockedApps": {
           "type": "array",

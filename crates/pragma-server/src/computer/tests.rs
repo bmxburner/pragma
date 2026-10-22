@@ -46,7 +46,10 @@ fn world(config: Option<Value>) -> World {
     let log = Arc::clone(&backend.log);
     let helper = Arc::new(InProcessHelper::new(
         Box::new(backend),
-        server.path().join("shots"),
+        // The same directory the real helper writes to, so the sweep sees it.
+        server
+            .path()
+            .join(&pragma_constants::CONSTANTS.computer.screenshots_directory),
     ));
     let activity = Arc::new(ActivityBus::default());
     let service = ComputerService::with_helper(
@@ -473,4 +476,21 @@ fn only_the_desktop_reads_session_frames() {
         .call(&user(), json!({ "op": "frame", "session": session }))
         .unwrap();
     assert_eq!(frame["format"], "png");
+}
+
+#[test]
+fn old_screenshots_are_swept() {
+    let w = world(Some(enabled_allowing_agents()));
+    let shot = w
+        .call(
+            &agent("t1"),
+            json!({ "op": "screenshot", "app": "TextEdit" }),
+        )
+        .unwrap();
+    let path = std::path::PathBuf::from(shot["path"].as_str().unwrap());
+    w.service.sweep_screenshots(std::time::SystemTime::now());
+    assert!(path.exists(), "a fresh screenshot is kept");
+    w.service
+        .sweep_screenshots(std::time::SystemTime::now() + std::time::Duration::from_hours(48));
+    assert!(!path.exists(), "a day-old screenshot is deleted");
 }

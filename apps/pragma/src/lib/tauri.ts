@@ -2522,30 +2522,3 @@ export function onComputerActivity(
 ): Promise<UnlistenFn> {
   return listen<ComputerActivityMessage>("pragma:computer", (event) => handler(event.payload));
 }
-
-/** Shows (creating if needed) a worktree's computer-use picture-in-picture window. */
-export function computerPipShow(worktreeId: string): Promise<void> {
-  return invoke("computer_pip_show", { worktreeId });
-}
-
-/** Hides a worktree's picture-in-picture window without ending its session. */
-export function computerPipHide(worktreeId: string): Promise<void> {
-  return invoke("computer_pip_hide", { worktreeId });
-}
-
-/** Closes a worktree's picture-in-picture window once its session has ended. */
-export function computerPipClose(worktreeId: string): Promise<void> {
-  return invoke("computer_pip_close", { worktreeId });
-}
-
-/**
- * Expands the picture-in-picture window onto the display the agent cursor is
- * on, centred on `cursor`, or shrinks it back to its corner.
- */
-export function computerPipExpand(
-  worktreeId: string,
-  expanded: boolean,
-  cursor: [number, number] | null,
-): Promise<void> {
-  return invoke("computer_pip_expand", { worktreeId, expanded, cursor });
-}

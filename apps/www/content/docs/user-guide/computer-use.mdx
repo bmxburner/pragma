@@ -1,0 +1,88 @@
+---
+title: Computer use
+description: Let agents read the screen and click and type in other apps on your Mac, while you watch and can stop them at any time.
+---
+
+Computer use lets an agent work in apps outside its terminal: open Safari and go to a
+page, fill in a form in a desktop app, press a menu shortcut. The agent drives it through
+[`pragma-cli computer`](/docs/cli/computer). Pragma shows you exactly what it is doing and
+gives you a stop that always works.
+
+Computer use is **macOS only** for now. On other platforms every command reports
+`unsupportedPlatform`.
+
+## Turn it on
+
+Computer use is **off** until you enable it under **Settings → Computer Use**. The same
+page shows the two macOS permissions it needs, **Accessibility** and **Screen
+Recording**. Click **Request access** and allow both in System Settings → Privacy &
+Security. They belong to Pragma's computer-use helper, not to the agent.
+
+## Who may control apps
+
+Under **Who may control apps** you choose, for agents and for scripts using the SDK:
+
+- **Ask me first** (the default): the first time an agent tries, Pragma asks you. You can
+  allow it **for this session** or **always**, or deny it.
+- **Allow**: no prompt.
+- **Never**: every request is refused.
+
+**Sensitive controls**, such as buttons labelled Delete, Send, Pay or Confirm, and
+password fields, ask again for that one action unless you set them to Allow.
+
+Some apps are always off limits, whatever you choose: Pragma itself, Keychain Access,
+password managers, and system security prompts. That way an agent can never approve its
+own request.
+
+## Seeing what an agent does
+
+While an agent is in control:
+
+- **The agent cursor.** A coloured arrow with the agent's name and its next step glides
+  to each target just before the action happens. Actions that use accessibility, such as
+  pressing a button or setting a text field, never move your real pointer, so this cursor
+  is often the only one that moves. Clicking at a point, dragging and scrolling do move
+  the real pointer. A single click puts it back where you left it.
+- **The picture-in-picture panel.** A small panel floating inside the Pragma window
+  shows a live view of the app being driven, who is driving it, and what it is doing. It
+  shows only the selected worktree's agents. Drag it anywhere in the window by its
+  header, **minimize** it to a pill in the corner, or **Expand to cursor**: the panel
+  grows and zooms its view onto the agent's cursor, following it as it moves.
+- **The sidebar.** The worktree row shows a pointer badge while one of its agents is in
+  control. It turns amber while a prompt waits for you. Click it to select that worktree
+  and bring the panel back if it was minimized.
+
+The agent cursor is excluded from screenshots, so it never appears in what an agent reads
+back.
+
+## Stopping
+
+- **Pause** in the panel pauses that agent; **Resume** lets it continue.
+- **Stop** ends that agent's session and releases the apps it was using.
+- The **emergency stop**, <kbd>⌃</kbd><kbd>⌥</kbd><kbd>⌘</kbd><kbd>.</kbd>, works from any
+  app. It stops every agent at once, denies every open prompt, and halts a long typing
+  action within one chunk of text. Nothing can act again until you click **Resume** under
+  Settings → Computer Use.
+
+Controlling apps needs the Pragma window open, so you can always see and stop it. Reading
+the screen (listing apps, inspecting a window, taking a screenshot) works with Pragma
+closed, but still follows the access policy.
+
+## Sessions and leases
+
+Each agent tab gets one session. A session holds an exclusive lease on every app it
+has acted in, so two agents never drive the same app at once. A second agent asking
+for a leased app gets `appBusy`, naming who has it. Two agents in two different apps
+work side by side. Short actions that need the keyboard or the real pointer take turns.
+
+A session ends when the agent runs `pragma-cli computer end`, when it finishes its turn,
+when its tab closes, after two minutes without an action, or when you stop it.
+
+## Security notes
+
+- Text on screen is **untrusted data**. Agents are told never to follow instructions
+  they read there.
+- Typed text never appears in the activity log or the sidebar; it shows as
+  `•••• (12 chars)`. The value of a password field is never read.
+- Screenshots are written to an owner-only folder and deleted after a day.
+- Computer use is not reachable from a paired phone or the remote-access tunnel.
