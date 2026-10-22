@@ -6785,7 +6785,7 @@
       "description": "A pending request for the desktop user to allow a caller or a sensitive action.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "caller", "op", "reason", "requestedAt", "expiresAt"],
+      "required": ["id", "caller", "op", "reason", "sensitive", "requestedAt", "expiresAt"],
       "properties": {
         "id": {
           "type": "string"
@@ -6802,6 +6802,10 @@
         "reason": {
           "type": "string",
           "description": "Why approval is needed, in plain words."
+        },
+        "sensitive": {
+          "type": "boolean",
+          "description": "True when the prompt is for one sensitive control (a Delete or Send button, a password field) rather than for access as a whole; it can only be allowed once."
         },
         "target": {
           "$ref": "#/definitions/ComputerTarget"

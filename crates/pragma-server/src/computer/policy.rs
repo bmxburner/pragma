@@ -248,6 +248,7 @@ mod tests {
             session_id: None,
             op: ComputerOp::Click,
             reason: "first use".to_string(),
+            sensitive: false,
             target: None,
             requested_at: 0,
             expires_at: 0,

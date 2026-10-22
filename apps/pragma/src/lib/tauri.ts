@@ -1,6 +1,8 @@
 import type { AutoSelectProviderUsage } from "@pragma-sh/accounts-view";
 import type {
   AgentProgressEstimate,
+  ComputerActivityEvent,
+  ComputerActivitySnapshot,
   Fanout,
   ScratchpadFile,
   FanoutPickResult,
@@ -2495,4 +2497,55 @@ export function baseFileDiff(
 /** Lists a worktree's managed scratchpads with their full MDX source. */
 export function listScratchpadFiles(worktreeId: string): Promise<ScratchpadFile[]> {
   return invoke<ScratchpadFile[]>("list_scratchpad_files", { worktreeId });
+}
+
+// ------------------------------- computer use --------------------------------
+
+/**
+ * Sends one `computer` RPC to the local host as the desktop user.
+ *
+ * The Rust side always overwrites the caller with `user`, so approvals, pause,
+ * and the stop can only come from this window — never from an agent's CLI.
+ */
+export function computerRpc<T>(payload: Record<string, unknown>): Promise<T> {
+  return invoke<T>("computer_rpc", { payload });
+}
+
+/** One message on the computer-use activity bridge. */
+export type ComputerActivityMessage =
+  | { kind: "snapshot"; payload: ComputerActivitySnapshot }
+  | { kind: "delta"; payload: ComputerActivityEvent };
+
+/** Subscribes to the local host's computer-use activity (snapshot, then deltas). */
+export function onComputerActivity(
+  handler: (message: ComputerActivityMessage) => void,
+): Promise<UnlistenFn> {
+  return listen<ComputerActivityMessage>("pragma:computer", (event) => handler(event.payload));
+}
+
+/** Shows (creating if needed) a worktree's computer-use picture-in-picture window. */
+export function computerPipShow(worktreeId: string): Promise<void> {
+  return invoke("computer_pip_show", { worktreeId });
+}
+
+/** Hides a worktree's picture-in-picture window without ending its session. */
+export function computerPipHide(worktreeId: string): Promise<void> {
+  return invoke("computer_pip_hide", { worktreeId });
+}
+
+/** Closes a worktree's picture-in-picture window once its session has ended. */
+export function computerPipClose(worktreeId: string): Promise<void> {
+  return invoke("computer_pip_close", { worktreeId });
+}
+
+/**
+ * Expands the picture-in-picture window onto the display the agent cursor is
+ * on, centred on `cursor`, or shrinks it back to its corner.
+ */
+export function computerPipExpand(
+  worktreeId: string,
+  expanded: boolean,
+  cursor: [number, number] | null,
+): Promise<void> {
+  return invoke("computer_pip_expand", { worktreeId, expanded, cursor });
 }

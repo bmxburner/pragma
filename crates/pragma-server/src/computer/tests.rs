@@ -245,6 +245,7 @@ fn ask_waits_for_the_desktop_user_and_a_session_grant_sticks() {
         std::thread::yield_now();
     };
     assert_eq!(approval["caller"]["agentId"], "claude-code");
+    assert_eq!(approval["sensitive"], false);
     // The agent cannot answer its own prompt.
     assert_eq!(
         w.code(
@@ -316,6 +317,7 @@ fn sensitive_controls_need_approval_even_for_allowed_agents() {
         std::thread::yield_now();
     };
     assert!(approval["reason"].as_str().unwrap().contains("Delete"));
+    assert_eq!(approval["sensitive"], true);
     w.call(
         &user(),
         json!({ "op": "approve", "approval": approval["id"], "decision": "deny" }),
@@ -451,4 +453,24 @@ fn bad_payloads_are_typed() {
         w.code(&agent("t1"), json!({ "op": "click", "bogus": 1 })),
         ComputerErrorCode::InvalidPayload
     );
+}
+
+#[test]
+fn only_the_desktop_reads_session_frames() {
+    let w = world(Some(enabled_allowing_agents()));
+    let done = w
+        .call(
+            &agent("t1"),
+            json!({ "op": "key", "app": "TextEdit", "chords": ["enter"] }),
+        )
+        .unwrap();
+    let session = done["sessionId"].clone();
+    assert_eq!(
+        w.code(&agent("t2"), json!({ "op": "frame", "session": session })),
+        ComputerErrorCode::NotAuthorized
+    );
+    let frame = w
+        .call(&user(), json!({ "op": "frame", "session": session }))
+        .unwrap();
+    assert_eq!(frame["format"], "png");
 }

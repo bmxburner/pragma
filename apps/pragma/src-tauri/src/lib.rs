@@ -9,6 +9,7 @@ mod agent_sounds;
 mod ai;
 mod automations;
 mod browser;
+mod computer;
 mod config_file;
 mod control;
 mod db;
@@ -1369,6 +1370,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     ensure_gateway_in_background(pty.clone());
     agent_events::start_for(app.handle().clone(), pty.clone());
     fanouts::start_for(app.handle().clone(), pty.clone());
+    computer::start(app.handle().clone(), pty.clone());
     automations::start(app.handle().clone(), pty.clone());
     control::start(app.handle().clone(), pty, LOCAL_HOST.to_string());
     ssh_host::reconnect_remote_hosts(app.handle().clone());
@@ -1456,6 +1458,20 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_shortcuts([computer::emergency_stop_shortcut()])
+                .unwrap_or_else(|error| {
+                    log::warn!("could not register the computer-use stop shortcut: {error}");
+                    tauri_plugin_global_shortcut::Builder::new()
+                })
+                .with_handler(|app, _shortcut, event| {
+                    if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        computer::emergency_stop(app);
+                    }
+                })
+                .build(),
+        )
         .setup(setup_app)
         .invoke_handler(tauri::generate_handler![
             app_info,
@@ -1638,6 +1654,11 @@ pub fn run() {
             fanouts::list_fanouts,
             fanouts::restore_fanout_tab,
             fanouts::pick_fanout_member,
+            computer::computer_rpc,
+            computer::computer_pip_show,
+            computer::computer_pip_hide,
+            computer::computer_pip_close,
+            computer::computer_pip_expand,
             ai::ai_generate_pull_request_draft,
             ai::ai_commit_all_and_generate_pull_request_draft,
             ai::ai_inline_edit,

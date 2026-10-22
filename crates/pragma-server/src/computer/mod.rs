@@ -540,7 +540,14 @@ impl ComputerService {
                 let ended = id.and_then(|id| self.end_session(&id, "ended"));
                 Ok(serde_json::json!({ "ended": ended.is_some(), "session": ended }))
             }
-            ComputerOpRequest::Frame(request) => self.frame(&request),
+            // Frames are screenshots; only the desktop's PiP may pull them.
+            ComputerOpRequest::Frame(request) if caller.kind == ComputerCallerKind::User => {
+                self.frame(&request)
+            }
+            ComputerOpRequest::Frame(_) => Err(failure(
+                ComputerErrorCode::NotAuthorized,
+                "only the Pragma desktop app can read session frames",
+            )),
             ComputerOpRequest::Approve(request) => {
                 let approval = self.policy.answer(&request.approval, request.decision)?;
                 let mut resolved = event(ComputerActivityType::ApprovalResolved);
@@ -744,7 +751,8 @@ impl ComputerService {
                     return Ok(());
                 }
                 let reason = format!("{} wants to use your computer", caller_label(caller));
-                match self.ask(host, caller, op, session_id, target, reason)? {
+                let approval = approval_for(caller, op, session_id, target, reason, false);
+                match self.ask(host, &approval)? {
                     Verdict::Allowed {
                         remember_for_session,
                     } => {
@@ -765,11 +773,7 @@ impl ComputerService {
     fn ask(
         &self,
         host: &dyn ComputerHost,
-        caller: &ComputerCaller,
-        op: ComputerOp,
-        session_id: Option<&str>,
-        target: Option<&ComputerTarget>,
-        reason: String,
+        approval: &ComputerApproval,
     ) -> Result<Verdict, ComputerFailure> {
         if !host.desktop_connected() {
             let mut offline = failure(
@@ -782,19 +786,8 @@ impl ComputerService {
             );
             return Err(offline);
         }
-        let now = now_ms();
-        let approval = ComputerApproval {
-            id: format!("ap_{}", uuid::Uuid::new_v4().simple()),
-            caller: caller.clone(),
-            session_id: session_id.map(str::to_string),
-            op,
-            reason,
-            target: target.cloned(),
-            requested_at: now,
-            expires_at: now + CONSTANTS.computer.approval_timeout_ms.get(),
-        };
         let activity = Arc::clone(&self.activity);
-        self.policy.wait_for(&approval, |approval| {
+        self.policy.wait_for(approval, |approval| {
             let mut requested = event(ComputerActivityType::ApprovalRequested);
             requested.caller = Some(approval.caller.clone());
             requested.session_id.clone_from(&approval.session_id);
@@ -1097,7 +1090,8 @@ impl ComputerService {
         if sensitive == ComputerAccess::Deny {
             return Err(failure(ComputerErrorCode::NotAuthorized, reason));
         }
-        match self.ask(host, caller, op, Some(&session.id), Some(target), reason)? {
+        let approval = approval_for(caller, op, Some(&session.id), Some(target), reason, true);
+        match self.ask(host, &approval)? {
             Verdict::Allowed { .. } => Ok(()),
             Verdict::Denied => Err(failure(ComputerErrorCode::Denied, "the user declined")),
         }
@@ -1253,6 +1247,29 @@ impl ComputerService {
         // The PiP holds the bytes; the file is not needed once read.
         let _ = std::fs::remove_file(&shot.path);
         to_value(&shot)
+    }
+}
+
+/// A new approval prompt, expiring after the shipped timeout.
+fn approval_for(
+    caller: &ComputerCaller,
+    op: ComputerOp,
+    session_id: Option<&str>,
+    target: Option<&ComputerTarget>,
+    reason: String,
+    sensitive: bool,
+) -> ComputerApproval {
+    let now = now_ms();
+    ComputerApproval {
+        id: format!("ap_{}", uuid::Uuid::new_v4().simple()),
+        caller: caller.clone(),
+        session_id: session_id.map(str::to_string),
+        op,
+        reason,
+        sensitive,
+        target: target.cloned(),
+        requested_at: now,
+        expires_at: now + CONSTANTS.computer.approval_timeout_ms.get(),
     }
 }
 
