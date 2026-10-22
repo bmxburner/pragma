@@ -72,14 +72,26 @@ fn unavailable(message: impl Into<String>) -> pragma_constants::ComputerFailure 
 
 /// Where the helper binary lives: `PRAGMA_COMPUTER_HELPER` when set (tests,
 /// local experiments), else beside this server executable, where both a dev
-/// `cargo build` and the packaged app put it.
+/// `cargo build` and the packaged app put it. When the macOS helper app
+/// (`<macHelperAppName>.app`) sits there too, its executable wins: macOS
+/// grants Accessibility and Screen Recording to an app bundle, while System
+/// Settings refuses a bare ad hoc binary. Only macOS builds stage that bundle.
 fn helper_path() -> PathBuf {
     if let Some(path) = std::env::var_os("PRAGMA_COMPUTER_HELPER") {
         return PathBuf::from(path);
     }
-    crate::sidecar::sidecar_executable(&crate::sidecar::executable_name(
-        &CONSTANTS.computer.helper_name,
-    ))
+    let name = crate::sidecar::executable_name(&CONSTANTS.computer.helper_name);
+    let bare = crate::sidecar::sidecar_executable(&name);
+    let bundled = bare.parent().map(|dir| {
+        dir.join(format!("{}.app", CONSTANTS.computer.mac_helper_app_name))
+            .join("Contents")
+            .join("MacOS")
+            .join(&name)
+    });
+    match bundled {
+        Some(path) if path.is_file() => path,
+        _ => bare,
+    }
 }
 
 impl ProcessHelper {

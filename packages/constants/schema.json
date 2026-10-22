@@ -5991,6 +5991,7 @@
       "required": [
         "helperName",
         "macHelperBundleId",
+        "macHelperAppName",
         "grantsFile",
         "screenshotsDirectory",
         "screenshotTtlMs",
@@ -6021,6 +6022,10 @@
         "macHelperBundleId": {
           "type": "string",
           "description": "Bundle identifier of the macOS helper app, which carries its own Accessibility and Screen Recording grants."
+        },
+        "macHelperAppName": {
+          "type": "string",
+          "description": "Name of the macOS helper app bundle (without `.app`) that wraps the helper executable beside the server; the name System Settings shows."
         },
         "grantsFile": {
           "type": "string",

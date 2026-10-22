@@ -56,16 +56,15 @@ exercise them by piping NDJSON into `target/debug/pragma-computer`, or through
 ## Known gaps (planned)
 
 - macOS TCC identity: the helper re-runs itself with responsibility disclaimed
-  (`macos/responsible.rs`), so Accessibility and Screen Recording attach to the
-  `pragma-computer` binary itself — in dev, `target/debug/pragma-computer`, not
-  the app or terminal that started the chain. System Settings silently refuses a
-  `linker-signed` binary, so `stage-daemon-sidecar.sh` (run by `bun run dev`)
-  re-signs a freshly linked debug helper ad hoc as `macHelperBundleId`; after a
-  manual `cargo build` run
-  `codesign --force --sign - --identifier com.pragma.computer-use target/debug/pragma-computer`.
-  An ad hoc build is identified by its hash, so a rebuild needs the grant re-added. Shipping it as
-  `Pragma Computer Use.app` (bundle id `constants.computer.macHelperBundleId`)
-  for a named, stable identity is still planned.
+  (`macos/responsible.rs`), so the grants attach to the helper, not the app or
+  terminal that started the chain. System Settings refuses a bare ad hoc binary,
+  so in dev `stage-daemon-sidecar.sh` (run by `bun run dev`) wraps it in
+  `target/debug/<macHelperAppName>.app` (bundle id `macHelperBundleId`, signed
+  ad hoc), and `pragma-server` prefers that bundle when it sits beside it
+  (`helper_path`). It shows in System Settings as "Pragma Computer Use". An ad
+  hoc bundle is identified by its hash, so a rebuilt helper needs the grants
+  re-added. The packaged app does not ship the bundle yet: release builds still
+  run the bare, Developer-ID-signed helper.
 - Capture uses `xcap`'s deprecated `CGWindowListCreateImage`; ScreenCaptureKit is
   the planned upgrade.
 - Chords use ANSI key codes with the character attached; a layout-aware mapping

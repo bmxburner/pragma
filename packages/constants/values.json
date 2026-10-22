@@ -522,6 +522,7 @@
   "computer": {
     "helperName": "pragma-computer",
     "macHelperBundleId": "com.pragma.computer-use",
+    "macHelperAppName": "Pragma Computer Use",
     "grantsFile": "computer-grants.json",
     "screenshotsDirectory": "computer/screenshots",
     "screenshotTtlMs": 86400000,

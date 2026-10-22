@@ -55,17 +55,39 @@ for crate in "${rust_sidecars[@]}"; do
   cargo build -p "$crate" $cargo_profile_flag
 done
 
-# macOS: the linker gives a debug binary only a `linker-signed` ad hoc
-# signature, which System Settings silently refuses to add to Accessibility or
-# Screen Recording. Re-sign the computer-use helper ad hoc under its stable
-# identifier so a dev build can be granted. Only a fresh link is re-signed, so
-# an unchanged binary keeps its hash and its grant. Release bundles are signed
-# by the Tauri bundler instead.
+# macOS: System Settings will not grant Accessibility or Screen Recording to a
+# bare debug binary (it carries only a `linker-signed` ad hoc signature, and
+# the list refuses it). Wrap the computer-use helper in a minimal app bundle
+# beside it, which `pragma-server` prefers (`helper_path`), and sign the bundle
+# ad hoc under the helper's bundle id. The bundle is rebuilt only when the
+# binary changed, so an unchanged helper keeps its hash and its grants.
 if [[ "$profile" == "debug" && "$(uname -s)" == "Darwin" ]]; then
+  values="$repo_root/packages/constants/values.json"
+  helper_id="$(sed -n 's/.*"macHelperBundleId": *"\([^"]*\)".*/\1/p' "$values")"
+  helper_app_name="$(sed -n 's/.*"macHelperAppName": *"\([^"]*\)".*/\1/p' "$values")"
   helper="$repo_root/target/debug/pragma-computer"
-  if codesign -dv "$helper" 2>&1 | grep -q "linker-signed"; then
-    helper_id="$(sed -n 's/.*"macHelperBundleId": *"\([^"]*\)".*/\1/p' "$repo_root/packages/constants/values.json")"
-    codesign --force --sign - --identifier "$helper_id" "$helper"
+  bundle="$repo_root/target/debug/$helper_app_name.app"
+  bundled_helper="$bundle/Contents/MacOS/pragma-computer"
+  if [[ ! -f "$bundled_helper" || "$helper" -nt "$bundled_helper" ]]; then
+    rm -rf "$bundle"
+    mkdir -p "$bundle/Contents/MacOS"
+    cp "$helper" "$bundled_helper"
+    cat >"$bundle/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>$helper_id</string>
+  <key>CFBundleName</key><string>$helper_app_name</string>
+  <key>CFBundleExecutable</key><string>pragma-computer</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSUIElement</key><true/>
+</dict>
+</plist>
+PLIST
+    codesign --force --sign - --identifier "$helper_id" "$bundle"
+    echo "bundled pragma-computer -> target/debug/$helper_app_name.app"
   fi
 fi
 
