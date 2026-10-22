@@ -308,9 +308,12 @@ also hits the correct machine for a remote project. Register development bundle 
 project/global `.pragma/config.json` `plugins[]`. Install runtime reporting through
 host's own mechanism:
 
-- OpenCode: absolute built `dist/index.mjs` path (or a `file://` URL) in the `plugin`
-  array of `~/.config/opencode/opencode.json`. Never register by bare package name —
-  OpenCode would try to npm-fetch it.
+- OpenCode v1: absolute built `dist/index.mjs` path (or a `file://` URL) in the `plugin`
+  array of `~/.config/opencode/opencode.json`. OpenCode v2: absolute `dist/v2` directory
+  path (v2 rejects file paths) in the `plugins` array — v1 plugins never run under v2. v2 server
+  plugins run in the shared background service, which has no tab env, so report status from
+  the directory's `tui` entry, which runs in the tab's own process. Never register a workspace
+  build by bare package name — OpenCode would try to npm-fetch it.
 - Claude Code: marketplace add/install.
 - Cursor: package's `install-local.sh` hook merger.
 

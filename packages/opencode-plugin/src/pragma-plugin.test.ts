@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { resetOpenCodeVersionCache } from "./opencode-version";
 import {
   OPENCODE_API_KEY_PROVIDERS,
   opencodeAgentPlugin,
@@ -13,7 +14,15 @@ import {
 const sourceDir = dirname(fileURLToPath(import.meta.url));
 
 /** Modules bundled into `dist/pragma-plugin.mjs`, the entry the webview imports. */
-const ENTRY_MODULES = ["pragma-plugin.ts", "usage-limits.ts", "cwd.ts"];
+const ENTRY_MODULES = [
+  "pragma-plugin.ts",
+  "usage-limits.ts",
+  "cwd.ts",
+  "accounts.ts",
+  "host-shell.ts",
+  "opencode-api.ts",
+  "opencode-version.ts",
+];
 
 describe("opencode plugin entry", () => {
   it("contributes the launchable OpenCode agent", () => {
@@ -61,26 +70,25 @@ describe("opencode account providers", () => {
     }
   });
 
-  // One `auth.json` holds every provider, so only OpenCode Go may relocate it;
-  // a second provider setting `XDG_DATA_HOME` would fight it at launch.
-  it("lets only OpenCode Go own a data directory", () => {
-    expect(byProvider("opencode-go")?.env?.("/h/1")).toEqual({ XDG_DATA_HOME: "/h/1" });
-    expect(byProvider("openai")?.env).toBeUndefined();
+  // OpenCode v2 serves every process from one background service, so a data
+  // directory no longer selects an account: every provider switches instead.
+  it("switches every provider in place instead of giving it a data directory", () => {
     for (const provider of opencodeAgentPlugin.accounts ?? []) {
-      if (provider.provider !== "opencode-go") expect(provider.env).toBeUndefined();
+      expect(provider.env).toBeUndefined();
+      expect(provider.swap?.activate).toBeTypeOf("function");
     }
+    expect(byProvider("opencode-go")?.usageLimits?.primaryLimitId).toBe("rolling");
   });
 
-  it("preselects each API-key provider's auth.json entry", () => {
-    expect(byProvider("openrouter")?.login?.command).toEqual([
-      "opencode",
-      "auth",
-      "login",
-      "--provider",
-      "openrouter",
-    ]);
-    expect(byProvider("zai")?.login?.command.at(-1)).toBe("zai-coding-plan");
+  // v1 preselects with `--provider`, v2 with a positional target, and each
+  // rejects the other's form; both open a picker when given neither.
+  it("signs in with the provider picker both OpenCode versions accept", () => {
+    for (const provider of opencodeAgentPlugin.accounts ?? []) {
+      expect(provider.login?.command).toEqual(["opencode", "auth", "login"]);
+    }
+    expect(byProvider("openrouter")?.login?.instructions).toContain("Pick OpenRouter");
     expect(byProvider("anthropic")?.login?.instructions).toContain("Anthropic API key");
+    expect(byProvider("openai")?.login?.instructions).toContain("ChatGPT Pro/Plus (browser)");
   });
 
   // Claude Free/Pro/Max OAuth may only be used in Claude Code and claude.ai.
@@ -93,21 +101,19 @@ describe("opencode account providers", () => {
       join(dir, "opencode", "auth.json"),
       JSON.stringify({ anthropic: { type: "oauth", access: "a", refresh: "r" } }),
     );
-    const account = { loginId: "x", home: dir, env: { XDG_DATA_HOME: dir } };
-    expect(await byProvider("anthropic")?.identify?.({ account } as never)).toBeNull();
-  });
-
-  it("preselects the provider in the login command", () => {
-    expect(byProvider("openai")?.login?.command).toEqual([
-      "opencode",
-      "auth",
-      "login",
-      "--provider",
-      "openai",
-      "--method",
-      "ChatGPT Pro/Plus (browser)",
-    ]);
-    expect(byProvider("github-copilot")?.login?.command).toContain("github-copilot");
+    resetOpenCodeVersionCache();
+    const ctx = {
+      account: { loginId: "x", home: dir, env: {} },
+      project: { path: dir },
+      sdk: {
+        exec: {
+          run: async () => [
+            { command: "", stdout: "1.19.3\n", stderr: "", status: 0, durationMs: 0 },
+          ],
+        },
+      },
+    };
+    expect(await byProvider("anthropic")?.identify?.(ctx as never)).toBeNull();
   });
 
   it("leaves the shared providers' icon to their own harness", () => {

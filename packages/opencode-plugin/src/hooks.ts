@@ -21,6 +21,17 @@ function messageTextKey(messageID: string, partID?: string): string {
 /** Chat-content-bearing runtime event types. */
 const CHAT_EVENT_TYPES = new Set(["message.updated", "message.part.updated", "message.part.delta"]);
 
+/**
+ * Events that resolve a pending prompt. A subagent's permission or question
+ * blocks the whole run just like the parent's, so these are never swallowed as
+ * child-session activity.
+ */
+const PROMPT_RESOLUTION_EVENT_TYPES = new Set([
+  "permission.replied",
+  "question.replied",
+  "question.rejected",
+]);
+
 /** Parsed `session.created`/`session.updated` info payload. */
 interface SessionEventInfo {
   id: string;
@@ -143,10 +154,20 @@ export function createPragmaOpencodeHooks(reporter: PragmaReporter): Hooks {
 
   let lastSessionName: string | null = null;
 
-  /** Mirrors a child session's lifecycle onto its parent. Returns true if handled. */
+  /**
+   * Mirrors a child session's lifecycle onto its parent. Returns true if handled.
+   * Prompt resolutions fall through to the normal status path, and a child's
+   * question-tool part still raises/clears attention (its transcript does not).
+   */
   async function handleChildSessionEvent(event: RuntimeEvent): Promise<boolean> {
-    if (!isChildSessionEvent(event)) {
+    if (!isChildSessionEvent(event) || PROMPT_RESOLUTION_EVENT_TYPES.has(event.type)) {
       return false;
+    }
+    if (event.type === "message.part.updated") {
+      if (applyQuestionPart(event)) {
+        await sync();
+      }
+      return true;
     }
     const parentId = childSessions.get(sessionIdFromEvent(event) ?? "");
     if (applyChildSessionEvent(event)) {
@@ -184,12 +205,16 @@ export function createPragmaOpencodeHooks(reporter: PragmaReporter): Hooks {
     return true;
   }
 
-  /** Runs the handlers that fully consume an event, short-circuiting the status sync. */
+  /**
+   * Runs the handlers that fully consume an event, short-circuiting the status
+   * sync. Prompts come first: a permission or question raised inside a subagent
+   * session needs the same notification as one raised by the parent.
+   */
   async function handleConsumingEvent(event: RuntimeEvent): Promise<boolean> {
     return (
-      (await handleChildSessionEvent(event)) ||
       (await handlePermissionEvent(event)) ||
-      (await handleQuestionAskedEvent(event))
+      (await handleQuestionAskedEvent(event)) ||
+      (await handleChildSessionEvent(event))
     );
   }
 
@@ -251,15 +276,16 @@ export function createPragmaOpencodeHooks(reporter: PragmaReporter): Hooks {
       await sync();
     },
     "tool.execute.before": async (input, output) => {
-      if (isChildSessionId(input.sessionID)) {
-        return;
-      }
       const args = isRecord(output?.args) ? output.args : {};
+      const child = isChildSessionId(input.sessionID);
       if (input.tool === "question") {
         scheduleLegacyQuestionAttention(
           args,
           typeof input.callID === "string" ? `opencode-question-${input.callID}` : undefined,
         );
+        if (child) {
+          return;
+        }
         // Surface a short human line in the transcript — never the raw args JSON.
         const parsed = parseQuestionArgs(args);
         await queueReport(() =>
@@ -269,6 +295,9 @@ export function createPragmaOpencodeHooks(reporter: PragmaReporter): Hooks {
         );
         return;
       }
+      if (child) {
+        return;
+      }
       busy = true;
       await queueReport(() =>
         reporter.message(toolMessage(input.tool, toolSummary(input.tool, args))),
@@ -276,9 +305,6 @@ export function createPragmaOpencodeHooks(reporter: PragmaReporter): Hooks {
       await sync();
     },
     "permission.ask": async (input) => {
-      if (isRecord(input) && isChildSessionId(input.sessionID)) {
-        return;
-      }
       // Kept for opencode builds that DO call this hook (absent from the verified
       // binary). Same command-approval report as the `permission.asked` event.
       await raiseCommandApproval(input);

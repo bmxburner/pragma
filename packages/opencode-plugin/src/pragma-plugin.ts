@@ -1,13 +1,8 @@
 import {
   accountProviderTitle,
-  apiKeyTokenKind,
-  credentialFileSharedToken,
-  credentialStoreAccount,
-  credentialStorePath,
   defineAccounts,
   defineAgent,
   definePlugin,
-  identifyFromCredentialStore,
   modelsDevAccountProviders,
   type AccountProviderDefinition,
   commandAndSkillDirs,
@@ -21,18 +16,28 @@ import {
 } from "@pragma-sh/plugin/catalog";
 import { createTuiWatcher } from "@pragma-sh/watcher-kit";
 
+import { openCodeStoreAccount } from "./accounts";
 import { pluginCwd } from "./cwd";
 import { loadOpenCodeGoUsageLimits } from "./usage-limits";
 
 /**
- * OpenCode keeps every provider's credential in one `auth.json` under
- * `$XDG_DATA_HOME/opencode`, keyed by provider id.
+ * OpenCode v1 keeps every provider's credential in one `auth.json` under
+ * `$XDG_DATA_HOME/opencode`, keyed by provider id. OpenCode v2 keeps them in
+ * its database instead (see `./accounts.ts`).
  */
 const OPENCODE_STORE: CredentialStore = {
   dirEnv: "XDG_DATA_HOME",
   defaultDir: "~/.local/share",
   file: "opencode/auth.json",
 };
+
+/**
+ * The one sign-in command both OpenCode versions accept: v1 preselects a
+ * provider with `--provider`, v2 with a positional target, and each rejects
+ * the other's form. Bare, both open a provider picker. Pragma types this into
+ * the user's shell, so a version check there would not be portable.
+ */
+const OPENCODE_LOGIN = ["opencode", "auth", "login"];
 
 /**
  * API-key providers OpenCode signs in to, named by their models.dev ids in
@@ -53,20 +58,21 @@ function openCodeApiKeyProvider({
   provider,
   modelsDevIds,
 }: ModelsDevAccountProvider): AccountProviderDefinition {
-  return credentialStoreAccount({
+  const title = accountProviderTitle(provider);
+  return openCodeStoreAccount({
     provider,
     agent: "opencode",
     store: OPENCODE_STORE,
     entries: modelsDevIds,
     apiKeyOnly: true,
     login: {
-      command: ["opencode", "auth", "login", "--provider", modelsDevIds[0]],
-      instructions: `Paste your ${accountProviderTitle(provider)} API key here, then send.`,
+      command: OPENCODE_LOGIN,
+      instructions: `Pick ${title} when asked (type to filter, then send), then paste your ${title} API key.`,
     },
   });
 }
 
-/** OpenCode's own GitHub OAuth app (`opencode auth login --provider github-copilot`). */
+/** OpenCode's own GitHub OAuth app (its GitHub Copilot sign-in). */
 const OPENCODE_GITHUB_CLIENT_ID = "Ov23li8tweQw6odWQebz";
 
 const ansiEscapePattern = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[A-Za-z]`, "g");
@@ -108,41 +114,40 @@ export const opencodeAgentPlugin: PluginDefinition = definePlugin({
   ],
   accounts: defineAccounts([
     {
-      provider: "opencode-go",
-      agent: "opencode",
+      // OpenCode Go switches like every other OpenCode provider (see below). A
+      // per-login `XDG_DATA_HOME` used to separate its accounts, but OpenCode
+      // v2 serves every process from one background service and database, so
+      // a data directory no longer selects an account. Logins made that way
+      // already keep their key at `<home>/opencode/auth.json`, which is where
+      // the swap reads a login's saved entries.
+      ...openCodeStoreAccount({
+        provider: "opencode-go",
+        agent: "opencode",
+        store: OPENCODE_STORE,
+        entries: ["opencode-go"],
+        // The key is shared with Pi, Prime Agent, and Kimi Code holding OpenCode Go.
+        login: {
+          command: OPENCODE_LOGIN,
+          instructions:
+            "Pick OpenCode Go when asked (type to filter, then send), then paste the key from opencode.ai/auth.",
+        },
+      }),
       dashboardUrl: "https://opencode.ai/auth",
       iconPath: "assets/opencode.svg",
-      login: {
-        command: ["opencode", "auth", "login"],
-        instructions:
-          "Pick OpenCode Go when asked (type to filter, then send), then paste the key from opencode.ai/auth.",
-      },
-      // OpenCode keeps `auth.json` and its session database under
-      // `$XDG_DATA_HOME/opencode`, so a separate data home is a separate
-      // account — with its own session history.
-      env: (home) => ({ XDG_DATA_HOME: home }),
-      credentialPath: (home) => credentialStorePath(OPENCODE_STORE, home),
-      identify: identifyFromCredentialStore(OPENCODE_STORE, "opencode-go", "opencode-go"),
-      // The key is shared with Pi, Prime Agent, and Kimi Code holding OpenCode Go.
-      sharedToken: credentialFileSharedToken(OPENCODE_STORE, {
-        kind: apiKeyTokenKind("opencode-go"),
-        entry: "opencode-go",
-        type: "api",
-      }),
       usageLimits: {
         primaryLimitId: "rolling",
         load: loadOpenCodeGoUsageLimits,
       },
     },
-    // OpenAI and Copilot live in the same `auth.json` as OpenCode Go, so they
-    // cannot take a data directory of their own. They switch accounts by
-    // swapping their entries in that file at launch instead (`switchable`):
-    // a new account signs in inside its own Pragma home, and merges with the
+    // Every OpenCode provider shares one credential store, so none can take a
+    // data directory of its own. They switch accounts at launch instead —
+    // swapping entries in v1's `auth.json`, activating the bound credential on
+    // v2 (`openCodeStoreAccount`): a new account signs in inside its own Pragma home, and merges with the
     // Codex and Copilot CLI accounts it belongs to. Their usage comes from
     // those harnesses, and so does the row's icon: no `iconPath`, or
     // OpenCode's logo could head the OpenAI row.
     {
-      ...credentialStoreAccount({
+      ...openCodeStoreAccount({
         provider: "openai",
         agent: "opencode",
         store: OPENCODE_STORE,
@@ -152,22 +157,15 @@ export const opencodeAgentPlugin: PluginDefinition = definePlugin({
         // Codex (or Pi) can be used here without signing in again.
         sharedToken: { kind: "chatgpt", entry: "openai", type: "oauth" },
         login: {
-          command: [
-            "opencode",
-            "auth",
-            "login",
-            "--provider",
-            "openai",
-            "--method",
-            "ChatGPT Pro/Plus (browser)",
-          ],
-          instructions: "Sign in with ChatGPT in the browser tab that opens.",
+          command: OPENCODE_LOGIN,
+          instructions:
+            "Pick OpenAI, then ChatGPT Pro/Plus (browser), and sign in in the browser tab that opens.",
         },
       }),
       dashboardUrl: "https://chatgpt.com/codex/settings/usage",
     },
     {
-      ...credentialStoreAccount({
+      ...openCodeStoreAccount({
         provider: "github-copilot",
         agent: "opencode",
         store: OPENCODE_STORE,
@@ -181,10 +179,9 @@ export const opencodeAgentPlugin: PluginDefinition = definePlugin({
           type: "oauth",
         },
         login: {
-          command: ["opencode", "auth", "login", "--provider", "github-copilot"],
-          // Accept the preselected GitHub.com deployment.
-          input: [""],
-          instructions: "Enter the code shown here on the GitHub page that opens.",
+          command: OPENCODE_LOGIN,
+          instructions:
+            "Pick GitHub Copilot and GitHub.com, then enter the code shown here on the GitHub page that opens.",
         },
       }),
       dashboardUrl: "https://github.com/settings/copilot",
