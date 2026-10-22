@@ -30,6 +30,9 @@ helper binary that `pragma-server` spawns and supervises.
   daemon never links AppKit or a capture stack. The binary requires `native`.
 - **A platform without a backend fails loudly** (`unsupportedPlatform`), never
   with an empty result. Windows (UI Automation, `SendInput`, WGC) is not built yet.
+- **The helper is two processes on macOS.** The outer one only waits on its
+  disclaimed re-run; the inner one serves and exits within 50 ms of being
+  orphaned, so killing the pid the server holds still stops every native call.
 - **Prefer element actions to synthetic input.** `AXPress` / setting `AXValue`
   work on background windows and never move the user's pointer. Pointer and
   keyboard paths activate the target and re-check it is frontmost before every
@@ -52,10 +55,13 @@ exercise them by piping NDJSON into `target/debug/pragma-computer`, or through
 
 ## Known gaps (planned)
 
-- macOS TCC identity: the helper is a bare binary beside the server, so grants
-  attach to whatever launched the server. Shipping it as its own
-  `Pragma Computer Use.app` (bundle id `constants.computer.macHelperBundleId`) is
-  the planned fix.
+- macOS TCC identity: the helper re-runs itself with responsibility disclaimed
+  (`macos/responsible.rs`), so Accessibility and Screen Recording attach to the
+  `pragma-computer` binary itself — in dev, `target/debug/pragma-computer`, not
+  the app or terminal that started the chain. An ad-hoc-signed debug build is
+  identified by its hash, so a rebuild needs the grant re-added. Shipping it as
+  `Pragma Computer Use.app` (bundle id `constants.computer.macHelperBundleId`)
+  for a named, stable identity is still planned.
 - Capture uses `xcap`'s deprecated `CGWindowListCreateImage`; ScreenCaptureKit is
   the planned upgrade.
 - Chords use ANSI key codes with the character attached; a layout-aware mapping

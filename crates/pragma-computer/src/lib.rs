@@ -206,6 +206,23 @@ pub trait ComputerBackend {
     fn seconds_since_user_input(&mut self) -> Option<f64>;
 }
 
+/// Re-runs the helper as its own macOS TCC identity (see `macos/responsible.rs`).
+///
+/// Returns the exit code to exit with when this process only waited on the
+/// re-run, or `None` when it should serve. Always `None` off macOS.
+#[cfg(feature = "native")]
+#[must_use]
+pub fn run_as_own_identity() -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::run_as_own_identity()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// The backend for the platform this binary was built for.
 #[cfg(feature = "native")]
 #[must_use]

@@ -296,3 +296,78 @@ pub fn pump_run_loop() {
     let mode = unsafe { kCFRunLoopDefaultMode };
     let _ = CFRunLoop::run_in_mode(mode, 0.0, false);
 }
+
+extern "C" {
+    /// From `<spawn_private.h>`, exported by libSystem since macOS 10.14: a
+    /// child spawned with this attribute is its own TCC "responsible
+    /// process" instead of inheriting the app that started the chain.
+    fn responsibility_spawnattrs_setdisclaim(
+        attrs: *mut libc::posix_spawnattr_t,
+        disclaim: libc::c_int,
+    ) -> libc::c_int;
+}
+
+/// Runs `program` with `args` and `env` as its own responsible process,
+/// inheriting the standard streams, and returns its exit code once it ends.
+///
+/// # Errors
+///
+/// The `errno` of a failed spawn or wait.
+pub fn run_disclaimed(
+    program: &std::ffi::CStr,
+    args: &[std::ffi::CString],
+    env: &[std::ffi::CString],
+) -> Result<i32, i32> {
+    let mut arg_ptrs: Vec<*mut libc::c_char> = args.iter().map(|a| a.as_ptr().cast_mut()).collect();
+    arg_ptrs.push(std::ptr::null_mut());
+    let mut env_ptrs: Vec<*mut libc::c_char> = env.iter().map(|e| e.as_ptr().cast_mut()).collect();
+    env_ptrs.push(std::ptr::null_mut());
+    let mut attrs: libc::posix_spawnattr_t = std::ptr::null_mut();
+    // SAFETY: `attrs` is a valid out-pointer; it is destroyed below on every
+    // path after a successful init.
+    let error = unsafe { libc::posix_spawnattr_init(&raw mut attrs) };
+    if error != 0 {
+        return Err(error);
+    }
+    // SAFETY: `attrs` was initialized above.
+    let error = unsafe { responsibility_spawnattrs_setdisclaim(&raw mut attrs, 1) };
+    let mut pid: libc::pid_t = 0;
+    let error = if error == 0 {
+        // SAFETY: `program`, `arg_ptrs`, and `env_ptrs` are NUL-terminated and
+        // outlive the call; both end in a null pointer as
+        // `posix_spawn` requires; `attrs` is initialized.
+        unsafe {
+            libc::posix_spawn(
+                &raw mut pid,
+                program.as_ptr(),
+                std::ptr::null(),
+                &raw const attrs,
+                arg_ptrs.as_ptr(),
+                env_ptrs.as_ptr(),
+            )
+        }
+    } else {
+        error
+    };
+    // SAFETY: `attrs` was initialized above and is not used again.
+    unsafe { libc::posix_spawnattr_destroy(&raw mut attrs) };
+    if error != 0 {
+        return Err(error);
+    }
+    let mut status: libc::c_int = 0;
+    loop {
+        // SAFETY: `pid` is our own child and `status` a valid out-pointer.
+        if unsafe { libc::waitpid(pid, &raw mut status, 0) } == pid {
+            break;
+        }
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if errno != libc::EINTR {
+            return Err(errno);
+        }
+    }
+    Ok(if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else {
+        128 + libc::WTERMSIG(status)
+    })
+}

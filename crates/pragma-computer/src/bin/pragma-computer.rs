@@ -8,9 +8,14 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use pragma_computer::protocol::HelperHello;
-use pragma_computer::{native_backend, platform_name, serve::serve, Context, StopFlag};
+use pragma_computer::{
+    native_backend, platform_name, run_as_own_identity, serve::serve, Context, StopFlag,
+};
 
 fn main() {
+    if let Some(code) = run_as_own_identity() {
+        std::process::exit(code);
+    }
     let screenshots_dir = std::env::args()
         .skip_while(|arg| arg != "--screenshots-dir")
         .nth(1)

@@ -10,6 +10,7 @@
 mod apps;
 mod ffi;
 mod input;
+mod responsible;
 mod walk;
 
 use std::time::{Duration, Instant};
@@ -32,6 +33,7 @@ use pragma_core::computer::{
 
 use self::apps::Running;
 use self::ffi::Element;
+pub use self::responsible::run_as_own_identity;
 use crate::capture::{self, CaptureOutput, CaptureTarget};
 use crate::snapshot::{normalize_role, SnapshotRing, WalkLimits};
 use crate::{
