@@ -4,6 +4,7 @@ members = [
   "apps/pragma/src-tauri",
   "crates/pragma-cli",
   "crates/pragma-client",
+  "crates/pragma-computer",
   "crates/pragma-core",
   "crates/pragma-gateway",
   "crates/pragma-platform",

@@ -14,6 +14,7 @@ use pragma_constants::ProtocolRpcMethod;
 pub mod accounts;
 pub mod ai;
 pub mod cancel;
+pub mod computer;
 pub mod exec;
 pub mod fanout;
 pub mod fs;
@@ -120,6 +121,9 @@ impl Core {
             // Owned by `pragma-server`, which runs plugin account callbacks in the
             // plugins sidecar and hosts the hidden login terminals.
             | ProtocolRpcMethod::Accounts
+            // Owned by `pragma-server`, which supervises the native helper and
+            // holds the sessions, leases, and activity stream.
+            | ProtocolRpcMethod::Computer
             // Answered by `pragma-server`, which owns the host's process
             // spawning; the core router never sees it.
             | ProtocolRpcMethod::Wsl => Err(CoreError::UnsupportedMethod(

@@ -177,7 +177,8 @@
       "ports",
       "sessions",
       "scripts",
-      "accounts"
+      "accounts",
+      "computer"
     ],
     "events": [
       "agentStatus",
@@ -189,7 +190,8 @@
       "automationPending",
       "automationsChanged",
       "workspace",
-      "fanouts"
+      "fanouts",
+      "computerActivity"
     ],
     "errors": [
       "invalidPayload",
@@ -516,5 +518,217 @@
       "debounceMs": 750,
       "errorBackoffMs": 60000
     }
+  },
+  "computer": {
+    "helperName": "pragma-computer",
+    "macHelperBundleId": "com.pragma.computer-use",
+    "grantsFile": "computer-grants.json",
+    "screenshotsDirectory": "computer/screenshots",
+    "screenshotTtlMs": 86400000,
+    "idleTimeoutMs": 120000,
+    "inputMutexWaitMs": 5000,
+    "approvalTimeoutMs": 120000,
+    "snapshotTtlMs": 60000,
+    "snapshotRingSize": 32,
+    "maxNodes": 4000,
+    "walkBudgetMs": 600,
+    "minElementPoints": 4,
+    "maxOffscreenElements": 50,
+    "labelMaxChars": 80,
+    "appLaunchWaitMs": 15000,
+    "actionTimeoutMs": 10000,
+    "typeChunkUnits": 20,
+    "cursorLeadMs": 150,
+    "helperRestartBackoffMs": [
+      1000,
+      2000,
+      5000
+    ],
+    "pipWindowLabelPrefix": "computer-pip-",
+    "blockedApps": [
+      "mac:com.apple.keychainaccess",
+      "mac:com.apple.securityagent",
+      "mac:com.apple.loginwindow",
+      "mac:com.apple.systempreferences",
+      "mac:com.apple.settings.privacysecurity.extension",
+      "mac:com.1password.1password",
+      "mac:com.bitwarden.desktop",
+      "mac:com.lastpass.lastpassmacdesktop",
+      "mac:com.apple.passwords",
+      "win:consent.exe",
+      "win:logonui.exe",
+      "win:credentialuibroker.exe",
+      "win:1password.exe",
+      "win:bitwarden.exe",
+      "win:keepass.exe"
+    ],
+    "sensitiveLabels": [
+      "delete",
+      "remove",
+      "erase",
+      "send",
+      "submit",
+      "pay",
+      "buy",
+      "purchase",
+      "order",
+      "confirm",
+      "install",
+      "allow",
+      "grant",
+      "transfer",
+      "publish",
+      "sign out",
+      "log out"
+    ],
+    "commands": [
+      {
+        "op": "apps",
+        "mutating": false,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": false
+      },
+      {
+        "op": "windows",
+        "mutating": false,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": false
+      },
+      {
+        "op": "displays",
+        "mutating": false,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": false
+      },
+      {
+        "op": "open",
+        "mutating": true,
+        "lease": true,
+        "inputLock": "none",
+        "desktopOnly": false
+      },
+      {
+        "op": "focus",
+        "mutating": true,
+        "lease": true,
+        "inputLock": "always",
+        "desktopOnly": false
+      },
+      {
+        "op": "inspect",
+        "mutating": false,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": false
+      },
+      {
+        "op": "screenshot",
+        "mutating": false,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": false
+      },
+      {
+        "op": "click",
+        "mutating": true,
+        "lease": true,
+        "inputLock": "pointer",
+        "desktopOnly": false
+      },
+      {
+        "op": "type",
+        "mutating": true,
+        "lease": true,
+        "inputLock": "pointer",
+        "desktopOnly": false
+      },
+      {
+        "op": "key",
+        "mutating": true,
+        "lease": true,
+        "inputLock": "always",
+        "desktopOnly": false
+      },
+      {
+        "op": "scroll",
+        "mutating": true,
+        "lease": true,
+        "inputLock": "pointer",
+        "desktopOnly": false
+      },
+      {
+        "op": "move",
+        "mutating": true,
+        "lease": false,
+        "inputLock": "always",
+        "desktopOnly": false
+      },
+      {
+        "op": "drag",
+        "mutating": true,
+        "lease": true,
+        "inputLock": "always",
+        "desktopOnly": false
+      },
+      {
+        "op": "status",
+        "mutating": false,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": false
+      },
+      {
+        "op": "end",
+        "mutating": false,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": false
+      },
+      {
+        "op": "permissions",
+        "mutating": false,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": false
+      },
+      {
+        "op": "frame",
+        "mutating": false,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": false
+      },
+      {
+        "op": "approve",
+        "mutating": false,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": true
+      },
+      {
+        "op": "pause",
+        "mutating": false,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": true
+      },
+      {
+        "op": "unpause",
+        "mutating": false,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": true
+      },
+      {
+        "op": "stop",
+        "mutating": false,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": true
+      }
+    ]
   }
 }
