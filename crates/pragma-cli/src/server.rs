@@ -80,6 +80,16 @@ pub fn connect() -> Result<Server, CliError> {
 
 /// Sends one direct host RPC and waits for its matching response.
 pub fn rpc(method: ProtocolRpcMethod, payload: Value) -> Result<Value, CliError> {
+    rpc_reply(method, payload)?.map_err(|error| CliError::server(error.message))
+}
+
+/// Sends one RPC and returns the server's reply as-is: the payload, or the
+/// typed error with its details, for commands that render failures
+/// themselves (`pragma-cli computer` prints the code, hint, and details).
+pub fn rpc_reply(
+    method: ProtocolRpcMethod,
+    payload: Value,
+) -> Result<Result<Value, pragma_protocol::RpcError>, CliError> {
     let Server { mut stream } = connect()?;
     let request_id = Uuid::new_v4().to_string();
     write_json_frame(
@@ -114,10 +124,10 @@ pub fn rpc(method: ProtocolRpcMethod, payload: Value) -> Result<Value, CliError>
                 continue;
             }
             if ok {
-                return Ok(payload.unwrap_or(Value::Null));
+                return Ok(Ok(payload.unwrap_or(Value::Null)));
             }
             let error = error.ok_or_else(|| CliError::server("RPC request failed"))?;
-            return Err(CliError::server(error.message));
+            return Ok(Err(error));
         }
     }
 }
@@ -137,6 +147,9 @@ pub enum CliError {
     AppNotRunning,
     /// Any other operational error.
     Other(String),
+    /// A typed computer-use failure (`ComputerFailure` as JSON): rendered
+    /// with its code and hint, or verbatim under `--json`/`--toon`.
+    Computer(Value),
 }
 
 impl CliError {
@@ -158,6 +171,18 @@ impl std::fmt::Display for CliError {
             Self::AppNotRunning => f.write_str("Pragma is not running. Launch the app first."),
             Self::Config(message) | Self::Server(message) | Self::Other(message) => {
                 f.write_str(message)
+            }
+            Self::Computer(failure) => {
+                write!(
+                    f,
+                    "{} ({})",
+                    failure["message"].as_str().unwrap_or("computer use failed"),
+                    failure["code"].as_str().unwrap_or("internal")
+                )?;
+                if let Some(hint) = failure["hint"].as_str() {
+                    write!(f, "\nhint: {hint}")?;
+                }
+                Ok(())
             }
         }
     }
