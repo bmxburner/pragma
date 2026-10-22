@@ -12,27 +12,44 @@ workspace = true
 [[bin]]
 name = "pragma-computer"
 path = "src/bin/pragma-computer.rs"
+required-features = ["native"]
+
+[features]
+default = ["native"]
+# The platform backends and capture. `pragma-server` turns this off: it needs
+# only the protocol and the fake backend, never AppKit or a capture stack.
+native = [
+  "dep:image",
+  "dep:xcap",
+  "dep:libc",
+  "dep:objc2",
+  "dep:objc2-app-kit",
+  "dep:objc2-application-services",
+  "dep:objc2-core-foundation",
+  "dep:objc2-core-graphics",
+  "dep:objc2-foundation",
+]
 
 [dependencies]
 base64 = { workspace = true }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
 pragma-constants = { path = "../../packages/constants" }
 pragma-core = { path = "../pragma-core" }
 pragma-platform = { path = "../pragma-platform" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
-xcap = { version = "0.6", features = ["image"] }
+xcap = { version = "0.6", features = ["image"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = [
+libc = { version = "0.2", optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = [
   "std",
   "NSRunningApplication",
   "NSWorkspace",
 ] }
-objc2-application-services = { version = "0.3", default-features = false, features = [
+objc2-application-services = { version = "0.3", optional = true, default-features = false, features = [
   "std",
   "HIServices",
   "AXError",
@@ -41,7 +58,7 @@ objc2-application-services = { version = "0.3", default-features = false, featur
   "AXValueConstants",
   "libc",
 ] }
-objc2-core-foundation = { version = "0.3", default-features = false, features = [
+objc2-core-foundation = { version = "0.3", optional = true, default-features = false, features = [
   "std",
   "CFArray",
   "CFBase",
@@ -50,7 +67,7 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
   "CFNumber",
   "CFString",
 ] }
-objc2-core-graphics = { version = "0.3", default-features = false, features = [
+objc2-core-graphics = { version = "0.3", optional = true, default-features = false, features = [
   "std",
   "CGEvent",
   "CGEventSource",
@@ -58,7 +75,7 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
   "CGRemoteOperation",
   "CGWindow",
 ] }
-objc2-foundation = { version = "0.3", default-features = false, features = [
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = [
   "std",
   "NSArray",
   "NSString",

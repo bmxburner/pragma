@@ -34,9 +34,10 @@ use pragma_constants::{
 };
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "native")]
 pub mod capture;
 pub mod fake;
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "native", target_os = "macos"))]
 mod macos;
 pub mod protocol;
 pub mod serve;
@@ -206,6 +207,7 @@ pub trait ComputerBackend {
 }
 
 /// The backend for the platform this binary was built for.
+#[cfg(feature = "native")]
 #[must_use]
 pub fn native_backend() -> Box<dyn ComputerBackend> {
     #[cfg(target_os = "macos")]

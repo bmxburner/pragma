@@ -139,6 +139,8 @@ pub struct Registry {
     /// commit, and the finalize stage. Host-owned so a fanout survives the
     /// desktop being closed or the server restarting.
     fanouts: Arc<crate::fanouts::FanoutStore>,
+    /// The computer-use engine: sessions, leases, policy, and the helper.
+    computer: Arc<crate::computer::ComputerService>,
     /// Host-owned account providers: logins, bindings, hidden sign-in
     /// terminals, and the env every launch path resolves through.
     accounts: crate::accounts::AccountsHost,
@@ -416,6 +418,11 @@ impl Registry {
                 store
             },
             accounts: crate::accounts::AccountsHost::new(),
+            computer: {
+                let computer = crate::computer::ComputerService::new(&server_dir);
+                computer.start_sweeper();
+                computer
+            },
             server_dir,
         }
     }
@@ -797,6 +804,8 @@ impl Registry {
             snapshot.tabs.retain(|tab| tab.id != tab_id);
             Ok(())
         });
+        // A closed tab's agent cannot call `computer end`; release its apps.
+        self.computer.end_tab(tab_id);
         Ok(())
     }
 
@@ -1280,6 +1289,11 @@ impl Registry {
         // the agent would wait out a reconcile tick before it could reply.
         self.reconcile_watchers();
         Ok(tab_id)
+    }
+
+    /// The computer-use engine this host owns.
+    pub fn computer(&self) -> &Arc<crate::computer::ComputerService> {
+        &self.computer
     }
 
     /// The durable fanout record this host owns.
@@ -2006,6 +2020,7 @@ impl Registry {
         // removed when the hosting tab's session exits
         // ([`Self::clear_agents_for_tab`]).
         let member_status = payload.status.and_then(fanout_member_status);
+        let finished = payload.status;
         let tab_id = payload.tab_id.clone();
         statuses.insert(key, payload);
         drop(statuses);
@@ -2020,6 +2035,11 @@ impl Registry {
         // `partial` because a sibling failed.
         if let Some(status) = member_status {
             self.fanouts.apply_agent_status(&tab_id, status);
+        }
+        // An agent that finished its turn is done with the apps it drove; its
+        // next turn opens a fresh session, so the indicator never lingers.
+        if matches!(finished, Some(AgentStatus::Done | AgentStatus::Cleared)) {
+            self.computer.end_tab(&tab_id);
         }
         self.broadcast_agent(&event);
         self.broadcast_agent_status()?;
@@ -2322,6 +2342,15 @@ impl Registry {
                 watch.root != path && !watch.root.starts_with(format!("{path}/").as_str())
             });
         }
+    }
+
+    /// The agent most recently reporting from `tab_id`, if any.
+    pub fn agent_for_tab(&self, tab_id: &str) -> Option<String> {
+        self.agent_statuses
+            .lock()
+            .ok()?
+            .keys()
+            .find_map(|(_, tab, agent)| (tab == tab_id).then(|| agent.clone()))
     }
 
     /// Drops every agent status and chat message recorded for `tab_id`, and

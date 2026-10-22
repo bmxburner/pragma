@@ -2,6 +2,7 @@ mod accounts;
 mod agent_options;
 mod ai;
 mod automations;
+mod computer;
 mod fanout_host;
 mod fanouts;
 mod github;
@@ -682,6 +683,34 @@ fn handle_fanout_rpc(
     }
 }
 
+/// Runs one `computer` RPC. Like fanouts, the typed failure (its code, whether
+/// it is retryable, and its hint) rides in the error details, so the CLI, the
+/// SDK, and the desktop all branch on the same value.
+fn handle_computer_rpc(
+    request_id: String,
+    payload: serde_json::Value,
+    registry: &Registry,
+) -> RpcResponseFrame {
+    match registry.computer().handle_rpc(registry, payload) {
+        Ok(payload) => RpcResponseFrame {
+            request_id,
+            ok: true,
+            payload: Some(payload),
+            error: None,
+        },
+        Err(failure) => RpcResponseFrame {
+            request_id,
+            ok: false,
+            payload: None,
+            error: Some(RpcError {
+                code: pragma_core::computer::protocol_code(failure.code),
+                message: failure.message.clone(),
+                details: serde_json::to_value(&failure).ok(),
+            }),
+        },
+    }
+}
+
 fn handle_tabs_rpc(
     request_id: String,
     payload: serde_json::Value,
@@ -824,6 +853,11 @@ fn handle_server_owned_rpc(
     registry: &Registry,
 ) -> Option<Result<RpcResponseFrame, HandledRequestError>> {
     match rpc.method {
+        ProtocolRpcMethod::Computer => Some(Ok(handle_computer_rpc(
+            request_id.to_string(),
+            rpc.payload.clone(),
+            registry,
+        ))),
         ProtocolRpcMethod::Sessions => Some(handle_sessions_rpc(
             request_id.to_string(),
             rpc.payload.clone(),
@@ -1239,6 +1273,10 @@ fn subscription_snapshot(
         let (scrollback, rx) = registry
             .subscribe_workspace()
             .map_err(|err| HandledRequestError::Request(err.to_string()))?;
+        return Ok(EventStream { scrollback, rx });
+    }
+    if matches!(subscription.event, ProtocolEventKind::ComputerActivity) {
+        let (scrollback, rx) = registry.computer().subscribe(registry);
         return Ok(EventStream { scrollback, rx });
     }
     if matches!(subscription.event, ProtocolEventKind::Fanouts) {

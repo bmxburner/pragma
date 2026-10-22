@@ -5,7 +5,8 @@
 //! work here". Windows support lands as its own backend (UI Automation,
 //! `SendInput`, Windows Graphics Capture); Linux is out of scope.
 
-#![cfg_attr(target_os = "macos", allow(dead_code))]
+// Unused where a real backend exists, or when the native feature is off.
+#![cfg_attr(any(target_os = "macos", not(feature = "native")), allow(dead_code))]
 
 use pragma_constants::{
     ComputerApp, ComputerAppsRequest, ComputerClickRequest, ComputerDisplay, ComputerDragRequest,

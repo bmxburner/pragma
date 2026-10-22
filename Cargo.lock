@@ -6143,6 +6143,7 @@ dependencies = [
  "daemonize",
  "netstat2",
  "portable-pty",
+ "pragma-computer",
  "pragma-constants",
  "pragma-core",
  "pragma-platform",
