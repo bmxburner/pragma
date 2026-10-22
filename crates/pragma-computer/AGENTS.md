@@ -63,7 +63,10 @@ exercise them by piping NDJSON into `target/debug/pragma-computer`, or through
   ad hoc), and `pragma-server` prefers that bundle when it sits beside it
   (`helper_path`). It shows in System Settings as "Pragma Computer Use". An ad
   hoc bundle is identified by its hash, so a rebuilt helper needs the grants
-  re-added. The packaged app does not ship the bundle yet: release builds still
+  re-added — remove the entry with **−** and add it again, since toggling keeps
+  the old hash. A running helper keeps reporting Accessibility `denied` after
+  the grant (macOS reads it once per process); kill the helper and the server
+  restarts it. The packaged app does not ship the bundle yet: release builds still
   run the bare, Developer-ID-signed helper.
 - Capture uses `xcap`'s deprecated `CGWindowListCreateImage`; ScreenCaptureKit is
   the planned upgrade.
