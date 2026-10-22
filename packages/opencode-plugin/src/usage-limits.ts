@@ -1,6 +1,8 @@
 import type { PluginContext, UsageLimit, UsageLimitsResult } from "@pragma-sh/plugin/catalog";
 
 import { pluginCwd } from "./cwd";
+import { OPENCODE_MISSING_STATUS, hostQuote, withOpenCode } from "./host-shell";
+import { isOpenCodeV2 } from "./opencode-version";
 
 const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
 const GO_LIMITS = {
@@ -40,40 +42,131 @@ SELECT
 FROM usage
 `.trim();
 
-/**
- * Builds the usage query command. `exec.run` interprets each command through
- * the host's default shell: PowerShell on Windows, a POSIX shell everywhere
- * else. Neither the existence check nor the query quoting is portable between
- * the two.
- *
- * Resolved lazily, never at module scope: the desktop webview imports this
- * bundle to list launchable agents, and `process` does not exist there — a
- * module-scope read threw before any agent could be registered.
- */
-function usageCommand(): string {
-  return globalThis.process?.platform === "win32"
-    ? `if (-not (Get-Command opencode -ErrorAction SilentlyContinue)) { exit 20 }; opencode db ${powershellQuote(USAGE_QUERY)} --format json`
-    : "command -v opencode >/dev/null 2>&1 || exit 20; " +
-        `opencode db ${shellQuote(USAGE_QUERY)} --format json`;
-}
+const NOT_INSTALLED: UsageLimitsResult = {
+  status: "unavailable",
+  reason: "not-configured",
+  message: "Install OpenCode to load OpenCode Go usage limits.",
+};
 
-/** Loads device-local OpenCode Go usage from OpenCode's supported database command. */
+const NO_USAGE: UsageLimitsResult = {
+  status: "unavailable",
+  reason: "unsupported",
+  message: "No device-local OpenCode Go usage was found.",
+};
+
+/**
+ * Loads device-local OpenCode Go usage. OpenCode v1 answers one SQL aggregate
+ * through `opencode db`; v2 dropped that command, so its usage comes from the
+ * server's session statistics (see {@link loadOpenCodeGoUsageLimitsV2}).
+ */
 export async function loadOpenCodeGoUsageLimits(ctx: PluginContext): Promise<UsageLimitsResult> {
+  if (await isOpenCodeV2(ctx)) return loadOpenCodeGoUsageLimitsV2(ctx);
   const [result] = await ctx.sdk.exec.run({
     cwd: pluginCwd(ctx),
-    commands: [usageCommand()],
+    commands: [withOpenCode(`opencode db ${hostQuote(USAGE_QUERY)} --format json`)],
   });
-  if (result?.status === 20) {
-    return {
-      status: "unavailable",
-      reason: "not-configured",
-      message: "Install OpenCode to load OpenCode Go usage limits.",
-    };
-  }
+  if (result?.status === OPENCODE_MISSING_STATUS) return NOT_INSTALLED;
   if (!result || result.status !== 0) {
     throw new Error(result?.stderr.trim() || "OpenCode Go usage query failed");
   }
   return parseOpenCodeGoUsage(result.stdout);
+}
+
+/** One cost window, as `GET /api/experimental/session/stats?from=&to=` reports it. */
+interface UsageWindow {
+  id: "rolling" | "weekly" | "monthly";
+  from: number;
+  resetsAt: number | null;
+}
+
+/**
+ * The same three windows as the v1 query, in UTC: the rolling five hours, the
+ * week from Monday, and the calendar month. v2's statistics are aggregates, so
+ * the rolling window's reset (five hours after its first message) is unknown.
+ */
+export function openCodeGoUsageWindows(now: number): UsageWindow[] {
+  const today = new Date(now);
+  const dayStart = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
+  const weekStart = dayStart - ((today.getUTCDay() + 6) % 7) * 24 * 60 * 60 * 1000;
+  const monthStart = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1);
+  return [
+    { id: "rolling", from: now - FIVE_HOURS_MS, resetsAt: null },
+    { id: "weekly", from: weekStart, resetsAt: weekStart + 7 * 24 * 60 * 60 * 1000 },
+    {
+      id: "monthly",
+      from: monthStart,
+      resetsAt: Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 1),
+    },
+  ];
+}
+
+/**
+ * OpenCode v2 usage: per-model cost over each window from the server's session
+ * statistics (an `experimental` endpoint), summed for the `opencode-go`
+ * provider. The service keeps one database for every account, so this is the
+ * device's OpenCode Go usage, whichever key it was billed to.
+ */
+export async function loadOpenCodeGoUsageLimitsV2(
+  ctx: PluginContext,
+  now: number = Date.now(),
+): Promise<UsageLimitsResult> {
+  const windows = openCodeGoUsageWindows(now);
+  const results = await ctx.sdk.exec.run({
+    cwd: pluginCwd(ctx),
+    commands: windows.map((window) =>
+      withOpenCode(
+        `opencode api GET ${hostQuote(`/api/experimental/session/stats?from=${window.from}&to=${now}`)}`,
+      ),
+    ),
+    maxConcurrent: windows.length,
+  });
+  if (results.some((result) => result.status === OPENCODE_MISSING_STATUS)) return NOT_INSTALLED;
+  const usage = windows.map((_window, index) => {
+    const result = results[index];
+    if (!result || result.status !== 0) {
+      throw new Error(result?.stderr.trim() || "OpenCode Go usage query failed");
+    }
+    return parseOpenCodeGoStats(result.stdout);
+  });
+  if (usage.every((window) => window.steps === 0)) return NO_USAGE;
+  const titles = { rolling: "5-hour limit", weekly: "Weekly limit", monthly: "Monthly limit" };
+  return {
+    status: "ready",
+    observedAt: now,
+    limits: windows.map((window, index) =>
+      usageLimit(
+        window.id,
+        titles[window.id],
+        usage[index]?.cost,
+        GO_LIMITS[window.id],
+        window.resetsAt,
+        now,
+      ),
+    ),
+  };
+}
+
+/** Sums the `opencode-go` models in one v2 session-statistics response. */
+export function parseOpenCodeGoStats(stdout: string): { cost: number; steps: number } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new Error("OpenCode Go usage statistics were not valid JSON");
+  }
+  const data = isRecord(parsed) && isRecord(parsed.data) ? parsed.data : parsed;
+  const models = isRecord(data) && Array.isArray(data.models) ? data.models : null;
+  if (!models) throw new Error("OpenCode Go usage statistics had no model breakdown");
+  let cost = 0;
+  let steps = 0;
+  for (const entry of models) {
+    if (!isRecord(entry) || !isRecord(entry.model) || entry.model.providerID !== "opencode-go") {
+      continue;
+    }
+    cost += finiteNumber(entry.cost) ?? 0;
+    steps += finiteNumber(entry.steps) ?? 0;
+  }
+  return { cost, steps };
 }
 
 /** Normalizes one aggregate row returned by `opencode db --format json`. */
@@ -92,13 +185,7 @@ export function parseOpenCodeGoUsage(stdout: string): UsageLimitsResult {
   if (messageCount === null) {
     throw new Error("OpenCode Go usage query returned a malformed message count");
   }
-  if (messageCount === 0) {
-    return {
-      status: "unavailable",
-      reason: "unsupported",
-      message: "No device-local OpenCode Go usage was found.",
-    };
-  }
+  if (messageCount === 0) return NO_USAGE;
 
   const observedAt = requiredNumber(row.observedAt, "observation time");
   const limits: UsageLimit[] = [
@@ -163,12 +250,4 @@ function finiteNumber(value: unknown): number | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
-function powershellQuote(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
 }
