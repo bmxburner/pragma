@@ -19,7 +19,7 @@ export function resolveDevPort(value: string | undefined): number {
 }
 
 /** Returns whether a port can be bound on the local machine. */
-export function portIsAvailable(port: number): Promise<boolean> {
+function portIsAvailable(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const server = createServer();
     server.unref();
