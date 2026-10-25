@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { MousePointer2 } from "lucide-react";
 
-import { constants, type ComputerSession } from "@pragma-sh/constants";
+import { constants, type ComputerRect, type ComputerSession } from "@pragma-sh/constants";
 
 import { useComputerUse, type ComputerCursor } from "@/state/computer-use-store";
 
 /** How long the agent cursor glides to its next point: the host waits this long. */
 const GLIDE_MS = constants.computer.cursorLeadMs;
+/** How long it takes to catch up with its window as the user drags that window. */
+const FOLLOW_MS = 80;
 
 /**
  * The agent cursor, drawn on a transparent, click-through window covering one
@@ -27,7 +29,7 @@ export function CursorOverlay({ origin }: { origin: { x: number; y: number } }) 
     <div className="pointer-events-none fixed inset-0 overflow-hidden">
       {sessions.map((session) => {
         const cursor = cursors[session.id];
-        return cursor ? (
+        return cursor && session.pauseReason !== "stopped" ? (
           <AgentCursor cursor={cursor} key={session.id} origin={origin} session={session} />
         ) : null;
       })}
@@ -47,33 +49,59 @@ function AgentCursor({
   const x = cursor.point.x - origin.x;
   const y = cursor.point.y - origin.y;
   const ripple = useRipple(cursor.pulses);
+  const moveMs = session.paused ? 0 : cursor.tracking ? FOLLOW_MS : GLIDE_MS;
   // A cursor on another display has negative or out-of-bounds coordinates
-  // here and is simply clipped by `overflow-hidden`.
+  // here and is simply clipped by `overflow-hidden`. Inside this display it is
+  // clipped to the target window, and hidden where another app covers the
+  // point: the agent works in the background there, and a cursor floating
+  // over the user's own app would look like it was acting on it.
   return (
     <div
-      className="absolute top-0 left-0"
-      data-testid="agent-cursor"
+      className="pointer-events-none fixed inset-0"
       style={{
-        transform: `translate(${x}px, ${y}px)`,
-        transition: `transform ${GLIDE_MS}ms cubic-bezier(0.2, 0.8, 0.2, 1)`,
+        clipPath: windowClip(cursor.window, origin),
+        opacity: cursor.covered ? 0 : 1,
+        transition: `opacity ${GLIDE_MS}ms ease-out`,
       }}
     >
-      {ripple ? (
-        <span
-          className="absolute -top-4 -left-4 size-8 animate-ping rounded-full bg-primary/40"
-          key={ripple}
+      <div
+        className="absolute top-0 left-0"
+        data-testid="agent-cursor"
+        style={{
+          transform: `translate(${x}px, ${y}px)`,
+          transition: `transform ${moveMs}ms cubic-bezier(0.2, 0.8, 0.2, 1)`,
+        }}
+      >
+        {ripple && !session.paused ? (
+          <span
+            className="absolute -top-4 -left-4 size-8 animate-ping rounded-full bg-primary/40"
+            key={ripple}
+          />
+        ) : null}
+        <MousePointer2
+          className="size-6 fill-primary text-primary-foreground drop-shadow-md"
+          strokeWidth={1.5}
         />
-      ) : null}
-      <MousePointer2
-        className="size-6 fill-primary text-primary-foreground drop-shadow-md"
-        strokeWidth={1.5}
-      />
-      <div className="mt-1 ml-4 max-w-72 truncate rounded-md bg-primary px-2 py-0.5 text-xs font-medium text-primary-foreground shadow-md">
-        {session.owner.label ?? "Agent"}
-        {cursor.description ? `: ${cursor.description}` : ""}
+        <div className="mt-1 ml-4 max-w-72 truncate rounded-md bg-primary px-2 py-0.5 text-xs font-medium text-primary-foreground shadow-md">
+          {session.owner.label ?? "Agent"}
+          {session.paused ? ": Task paused" : cursor.description ? `: ${cursor.description}` : ""}
+        </div>
       </div>
     </div>
   );
+}
+
+/** A CSS clip to `window` in this overlay's coordinates; none when unknown. */
+export function windowClip(
+  window: ComputerRect | null,
+  origin: { x: number; y: number },
+): string | undefined {
+  if (!window) return undefined;
+  const left = window.x - origin.x;
+  const top = window.y - origin.y;
+  return `polygon(${left}px ${top}px, ${left + window.w}px ${top}px, ${left + window.w}px ${
+    top + window.h
+  }px, ${left}px ${top + window.h}px)`;
 }
 
 /** A key that changes on each new pulse and clears itself after the ripple. */

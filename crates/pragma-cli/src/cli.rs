@@ -108,9 +108,9 @@ pub enum ComputerCommand {
     Windows(ComputerAppArgs),
     /// Attached displays and their scale.
     Displays,
-    /// Launch an app, or bring a running one forward.
+    /// Launch an app in the background (a running one is left where it is).
     Open(ComputerOpenArgs),
-    /// Bring an app or one of its windows to the front.
+    /// Make an app's window its target for keys, without bringing it forward.
     Focus(ComputerFocusArgs),
     /// An accessibility snapshot: the elements you can click and type into.
     Inspect(ComputerInspectArgs),
@@ -130,6 +130,12 @@ pub enum ComputerCommand {
     Drag(ComputerDragArgs),
     /// Your session, leases, approvals, and the helper's health.
     Status(ComputerStatusArgs),
+    /// Run a durable, bounded computer task. Text must come from supplied inputs.
+    Run(ComputerRunArgs),
+    /// Resume a task after supplying missing inputs or a caller note.
+    Resume(ComputerResumeArgs),
+    /// Cancel one of your tasks. Already performed actions are kept.
+    Cancel { task_id: String },
     /// End your session: release its apps and clear the indicator.
     End,
     /// The helper's Accessibility and Screen Recording permissions.
@@ -165,8 +171,8 @@ pub struct ComputerOpenArgs {
     /// Start a second instance instead of re-activating a running one.
     #[arg(long)]
     pub new_instance: bool,
-    /// Launch without bringing it to the front.
-    #[arg(long)]
+    /// Accepted for older scripts: an agent's app is never brought to the front.
+    #[arg(long, hide = true)]
     pub no_activate: bool,
     /// How long to wait for its first window, in milliseconds.
     #[arg(long, value_name = "MS")]
@@ -379,9 +385,55 @@ pub struct ComputerDragArgs {
 
 #[derive(Debug, Args)]
 pub struct ComputerStatusArgs {
+    /// Read one durable task instead of the global activity snapshot.
+    pub task_id: Option<String>,
+    /// Wait until this task completes, fails, or needs input.
+    #[arg(long, requires = "task_id")]
+    pub wait: bool,
     /// Print the current state, then stream every activity event until Ctrl-C.
     #[arg(long)]
     pub events: bool,
+}
+
+/// Caller-supplied task variables. Secret values are never persisted by the host.
+#[derive(Debug, Args)]
+pub struct ComputerTaskInputs {
+    /// Literal name=value pairs (repeatable).
+    #[arg(long = "input")]
+    pub inputs: Vec<String>,
+    /// Secret name=value pairs (repeatable); prefer --inputs-json to avoid shell history.
+    #[arg(long = "secret")]
+    pub secrets: Vec<String>,
+    /// JSON file with inputs and secrets maps, or - to read stdin.
+    #[arg(long)]
+    pub inputs_json: Option<String>,
+    /// Maximum total steps, including those already performed.
+    #[arg(long)]
+    pub max_steps: Option<u64>,
+    /// Return immediately; the host continues the task.
+    #[arg(long)]
+    pub detach: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ComputerRunArgs {
+    pub instruction: String,
+    #[arg(long)]
+    pub app: Option<String>,
+    /// Reuse this id when retrying a request to avoid duplicate tasks.
+    #[arg(long)]
+    pub request_id: Option<String>,
+    #[command(flatten)]
+    pub inputs: ComputerTaskInputs,
+}
+
+#[derive(Debug, Args)]
+pub struct ComputerResumeArgs {
+    pub task_id: String,
+    #[arg(long)]
+    pub note: Option<String>,
+    #[command(flatten)]
+    pub inputs: ComputerTaskInputs,
 }
 
 #[derive(Debug, Args)]

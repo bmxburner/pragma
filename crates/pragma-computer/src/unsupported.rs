@@ -6,19 +6,23 @@
 //! `SendInput`, Windows Graphics Capture); Linux is out of scope.
 
 // Unused where a real backend exists, or when the native feature is off.
-#![cfg_attr(any(target_os = "macos", not(feature = "native")), allow(dead_code))]
+#![cfg_attr(
+    any(target_os = "macos", target_os = "windows", not(feature = "native")),
+    allow(dead_code)
+)]
 
 use pragma_constants::{
     ComputerApp, ComputerAppsRequest, ComputerClickRequest, ComputerDisplay, ComputerDragRequest,
     ComputerErrorCode, ComputerFailure, ComputerFocusRequest, ComputerInspectRequest,
     ComputerKeyRequest, ComputerMoveRequest, ComputerOpenRequest, ComputerPermissionState,
-    ComputerPermissions, ComputerScreenshot, ComputerScreenshotRequest, ComputerScrollRequest,
-    ComputerSnapshot, ComputerTypeRequest, ComputerWindow, ComputerWindowsRequest,
+    ComputerPermissions, ComputerPermissionsRequest, ComputerScreenshot, ComputerScreenshotRequest,
+    ComputerScrollRequest, ComputerSnapshot, ComputerTypeRequest, ComputerWindow,
+    ComputerWindowsRequest,
 };
 
 use crate::{
     failure, platform_name, ComputerBackend, ComputerResult, Context, Focused, Performed,
-    ResolveRequest, Resolved,
+    ResolveRequest, Resolved, UserActivity,
 };
 
 /// Refuses every operation with `unsupportedPlatform`.
@@ -32,7 +36,10 @@ fn unsupported() -> ComputerFailure {
 }
 
 impl ComputerBackend for UnsupportedBackend {
-    fn permissions(&mut self, _request: bool) -> ComputerResult<ComputerPermissions> {
+    fn permissions(
+        &mut self,
+        _request: &ComputerPermissionsRequest,
+    ) -> ComputerResult<ComputerPermissions> {
         Ok(ComputerPermissions {
             platform: platform_name().to_string(),
             supported: false,
@@ -86,7 +93,7 @@ impl ComputerBackend for UnsupportedBackend {
     fn drag(&mut self, _: &Context, _: &ComputerDragRequest) -> ComputerResult<Performed> {
         Err(unsupported())
     }
-    fn seconds_since_user_input(&mut self) -> Option<f64> {
+    fn user_activity(&mut self, _pid: Option<u64>) -> Option<UserActivity> {
         None
     }
 }

@@ -59,6 +59,7 @@ pub fn event(kind: ComputerActivityType) -> ComputerActivityEvent {
         session: None,
         approval: None,
         helper: None,
+        task: None,
     }
 }
 
@@ -76,10 +77,14 @@ impl ActivityBus {
         inner.seq += 1;
         event.seq = inner.seq;
         event.at = super::now_ms();
-        if inner.history.len() >= HISTORY {
-            inner.history.pop_front();
+        // Cursor tracking fires many times a second while a window is dragged;
+        // keeping it would push every real action out of the history.
+        if event.type_ != ComputerActivityType::CursorMoved {
+            if inner.history.len() >= HISTORY {
+                inner.history.pop_front();
+            }
+            inner.history.push_back(event.clone());
         }
-        inner.history.push_back(event.clone());
         let Ok(payload) = serde_json::to_value(&event) else {
             return;
         };

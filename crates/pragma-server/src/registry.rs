@@ -102,9 +102,9 @@ pub struct Registry {
     // can hold a handle back to this map and remove its own entry once its
     // last subscriber disconnects — see `start_file_watcher`.
     file_watchers: Arc<Mutex<HashMap<String, WorktreeFileWatch>>>,
-    /// The single registered controller (the GUI app). `None` while the app is
-    /// offline; on reconnect the new writer replaces the old one.
-    controller: Mutex<Option<ControllerWriter>>,
+    /// Connected desktop controllers; the newest (at the end) is active.
+    /// Older connections stay available if a newer app instance disconnects.
+    controllers: Mutex<Vec<ControllerWriter>>,
     /// In-flight brokered control requests keyed by `request_id`, each waiting
     /// for the controller's `ControlResult` reply.
     pending: Mutex<HashMap<String, Sender<ControlResult>>>,
@@ -397,7 +397,7 @@ impl Registry {
             agent_subscribers: Mutex::new(Vec::new()),
             agent_status_subscribers: Mutex::new(Vec::new()),
             file_watchers: Arc::new(Mutex::new(HashMap::new())),
-            controller: Mutex::new(None),
+            controllers: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
             workspace: Mutex::new(load_workspace_snapshot(&server_dir)),
             managed_tabs: Mutex::new(load_managed_tabs(&server_dir)),
@@ -2420,22 +2420,18 @@ impl Registry {
             .ok_or_else(|| RegistryError::NotFound(session_id.to_string()))
     }
 
-    /// Registers the calling connection as the single controller (the GUI app).
-    /// Replaces any previously-registered controller and fails every in-flight
-    /// request still waiting on the old one. The controller's `ControlResult`
-    /// replies are read on its own connection thread in the server and routed
-    /// via [`Self::route_control_result`].
+    /// Makes this desktop connection the active controller, retaining earlier
+    /// connections as standbys. Requests waiting on the previous active
+    /// controller fail rather than being replayed on another app instance.
     pub fn register_controller(&self, writer: ControllerWriter) -> Result<(), RegistryError> {
-        let mut controller = self
-            .controller
+        let mut controllers = self
+            .controllers
             .lock()
             .map_err(|_| RegistryError::LockPoisoned)?;
-        let replaced = controller.is_some();
-        *controller = Some(writer);
-        drop(controller);
-        if replaced {
+        if !controllers.is_empty() {
             self.fail_pending();
         }
+        controllers.push(writer);
         Ok(())
     }
 
@@ -2444,10 +2440,10 @@ impl Registry {
     /// that case.
     pub fn controller_writer(&self) -> Result<Option<ControllerWriter>, RegistryError> {
         Ok(self
-            .controller
+            .controllers
             .lock()
             .map_err(|_| RegistryError::LockPoisoned)?
-            .as_ref()
+            .last()
             .map(Arc::clone))
     }
 
@@ -2491,12 +2487,18 @@ impl Registry {
         }
     }
 
-    /// Clears the controller entry when its connection drops.
-    pub fn clear_controller(&self) {
-        if let Ok(mut controller) = self.controller.lock() {
-            *controller = None;
+    /// Removes only the disconnected connection. If it was active, fail its
+    /// pending requests and resume the newest desktop connection still alive.
+    pub fn clear_controller(&self, writer: &ControllerWriter) {
+        if let Ok(mut controllers) = self.controllers.lock() {
+            let was_active = controllers
+                .last()
+                .is_some_and(|active| Arc::ptr_eq(active, writer));
+            controllers.retain(|connected| !Arc::ptr_eq(connected, writer));
+            if was_active {
+                self.fail_pending();
+            }
         }
-        self.fail_pending();
     }
 
     /// Cancels a pending request when its CLI connection drops before the
@@ -3563,16 +3565,15 @@ mod tests {
         );
     }
 
-    /// Registers a controller using a throwaway socketpair writer so tests can
-    /// drive the broker without a real connection. Returns nothing — test code
-    /// simulates the controller replying by calling `route_control_result`.
-    fn register_fake_controller(registry: &Registry) {
+    /// Registers a socketpair writer; tests route replies through the registry.
+    fn register_fake_controller(registry: &Registry) -> super::ControllerWriter {
         let (a, _b) =
             pragma_platform::ipc::LocalStream::pair().expect("socketpair for fake controller");
         let writer = Arc::new(Mutex::new(a));
         registry
-            .register_controller(writer)
+            .register_controller(Arc::clone(&writer))
             .expect("register controller");
+        writer
     }
 
     #[test]
@@ -3698,6 +3699,56 @@ mod tests {
             .controller_writer()
             .expect("controller_writer")
             .is_some());
+    }
+
+    #[test]
+    fn disconnecting_an_older_controller_keeps_the_active_desktop_connected() {
+        let registry = Registry::default();
+        let old = register_fake_controller(&registry);
+        let active = register_fake_controller(&registry);
+        let pending = registry.pending_control("active".into()).unwrap();
+
+        registry.clear_controller(&old);
+        // Repeated cleanup of a stale connection must be harmless too.
+        registry.clear_controller(&old);
+
+        assert!(Arc::ptr_eq(
+            &registry.controller_writer().unwrap().unwrap(),
+            &active
+        ));
+        assert!(crate::computer::ComputerHost::desktop_connected(&registry));
+        assert!(matches!(
+            pending.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        registry.route_control_result(
+            "active",
+            ControlResult {
+                ok: true,
+                payload: None,
+                error: None,
+            },
+        );
+        assert!(pending.recv_timeout(Duration::from_secs(1)).unwrap().ok);
+    }
+
+    #[test]
+    fn disconnecting_the_active_controller_resumes_the_previous_desktop() {
+        let registry = Registry::default();
+        let original = register_fake_controller(&registry);
+        let temporary = register_fake_controller(&registry);
+        let pending = registry.pending_control("temporary".into()).unwrap();
+
+        registry.clear_controller(&temporary);
+
+        assert!(Arc::ptr_eq(
+            &registry.controller_writer().unwrap().unwrap(),
+            &original
+        ));
+        assert!(crate::computer::ComputerHost::desktop_connected(&registry));
+        assert!(!pending.recv_timeout(Duration::from_secs(1)).unwrap().ok);
+        registry.clear_controller(&original);
+        assert!(!crate::computer::ComputerHost::desktop_connected(&registry));
     }
 
     /// Opens a real shell in a real directory, the way a phone tap would.

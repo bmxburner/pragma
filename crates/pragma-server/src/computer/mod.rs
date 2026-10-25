@@ -17,13 +17,16 @@
 #![allow(clippy::result_large_err)]
 
 pub mod activity;
+mod cursor;
+mod decide;
 pub mod helper;
 pub mod policy;
 pub mod sessions;
+pub mod tasks;
 
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -36,14 +39,15 @@ use pragma_constants::{
     ComputerErrorCode, ComputerFailure, ComputerFocusRequest, ComputerFrameRequest,
     ComputerImageFormat, ComputerInputLock, ComputerInspectRequest, ComputerKeyRequest,
     ComputerMethod, ComputerMoveRequest, ComputerOp, ComputerOpenRequest, ComputerPauseReason,
-    ComputerPermissionsRequest, ComputerPoint, ComputerPointer, ComputerScreenshot,
-    ComputerScreenshotRequest, ComputerScrollRequest, ComputerSession, ComputerSessionRequest,
-    ComputerSnapshot, ComputerTarget, ComputerTypeRequest, ComputerUseSettings,
-    ComputerWindowsRequest, CONSTANTS,
+    ComputerPermissionState, ComputerPermissions, ComputerPermissionsRequest, ComputerPoint,
+    ComputerPointer, ComputerScreenshot, ComputerScreenshotRequest, ComputerScrollRequest,
+    ComputerSession, ComputerSessionRequest, ComputerSnapshot, ComputerTarget, ComputerTypeRequest,
+    ComputerUseSettings, ComputerWindowsRequest, CONSTANTS,
 };
 use pragma_core::computer::{
     app_key, caller_label, command_spec, failure, image_to_screen, is_blocked, is_enabled,
-    is_sensitive_label, owner_key, redact_text, truncate_label, AppIdentity,
+    is_sensitive_label, is_user_takeover, owner_key, redact_text, truncate_label, AppIdentity,
+    CursorAnchor, TrackedCursor, UserActivity,
 };
 use pragma_protocol::EventFrame;
 use serde::Deserialize;
@@ -54,7 +58,7 @@ use self::policy::{Policy, Verdict};
 use self::sessions::{InputMutex, Sessions};
 
 /// What the computer engine needs from the rest of the host.
-pub trait ComputerHost {
+pub trait ComputerHost: Send + Sync {
     /// Whether a desktop app is connected to show the active-control indicator.
     fn desktop_connected(&self) -> bool;
     /// The agent reporting from `tab_id`, if any.
@@ -67,6 +71,8 @@ pub trait ComputerHost {
 pub struct ComputerRequest {
     #[serde(default)]
     pub caller: Option<ComputerCaller>,
+    #[serde(default)]
+    task: Option<tasks::TaskGuard>,
     #[serde(flatten)]
     pub op: ComputerOpRequest,
 }
@@ -92,10 +98,15 @@ pub enum ComputerOpRequest {
     End(ComputerEndRequest),
     Permissions(ComputerPermissionsRequest),
     Frame(ComputerFrameRequest),
+    FocusSession(ComputerSessionRequest),
     Approve(ComputerApproveRequest),
     Pause(ComputerSessionRequest),
     Unpause(ComputerSessionRequest),
     Stop(ComputerSessionRequest),
+    Run(pragma_constants::ComputerRunRequest),
+    Resume(pragma_constants::ComputerResumeRequest),
+    Cancel(pragma_constants::ComputerTaskRequest),
+    Task(pragma_constants::ComputerTaskRequest),
 }
 
 impl ComputerOpRequest {
@@ -105,7 +116,7 @@ impl ComputerOpRequest {
             Self::Windows(_) => ComputerOp::Windows,
             Self::Displays => ComputerOp::Displays,
             Self::Open(_) => ComputerOp::Open,
-            Self::Focus(_) => ComputerOp::Focus,
+            Self::Focus(_) | Self::FocusSession(_) => ComputerOp::Focus,
             Self::Inspect(_) => ComputerOp::Inspect,
             Self::Screenshot(_) => ComputerOp::Screenshot,
             Self::Click(_) => ComputerOp::Click,
@@ -122,6 +133,10 @@ impl ComputerOpRequest {
             Self::Pause(_) => ComputerOp::Pause,
             Self::Unpause(_) => ComputerOp::Unpause,
             Self::Stop(_) => ComputerOp::Stop,
+            Self::Run(_) => ComputerOp::Run,
+            Self::Resume(_) => ComputerOp::Resume,
+            Self::Cancel(_) => ComputerOp::Cancel,
+            Self::Task(_) => ComputerOp::Task,
         }
     }
 }
@@ -143,6 +158,17 @@ fn misrouted(request: &ComputerOpRequest) -> ComputerFailure {
     )
 }
 
+/// Agents work in the background: an agent's app is never brought to the
+/// front, whatever the request asks. Only the desktop user's own navigation
+/// (the picture-in-picture arrow) activates an app.
+fn keep_in_background(op: &mut ComputerOpRequest) {
+    match op {
+        ComputerOpRequest::Open(request) => request.activate = Some(false),
+        ComputerOpRequest::Focus(request) => request.activate = Some(false),
+        _ => {}
+    }
+}
+
 /// Milliseconds since the Unix epoch.
 #[must_use]
 pub fn now_ms() -> u64 {
@@ -155,10 +181,10 @@ pub fn now_ms() -> u64 {
 
 /// Screenshots kept for `click --screenshot` image-space coordinates.
 const SHOT_MEMORY: usize = 64;
-/// Physical input this recent means the user is using the machine right now.
-const TAKEOVER_WINDOW_SECONDS: f64 = 0.3;
 /// Extra time a helper call may take beyond the shipped per-action bound.
 const CALL_SLACK: Duration = Duration::from_secs(2);
+/// How often anchored overlay cursors are re-placed against their windows.
+const CURSOR_TRACK_INTERVAL: Duration = Duration::from_millis(150);
 
 /// The computer-use engine.
 pub struct ComputerService {
@@ -171,8 +197,13 @@ pub struct ComputerService {
     /// Owners the desktop user allowed "for this session".
     session_grants: Mutex<HashSet<String>>,
     shots: Mutex<VecDeque<(String, ComputerPoint, f64)>>,
+    cursors: cursor::CursorTracker,
+    /// Helper calls in flight; cursor tracking never queues behind one.
+    busy: AtomicUsize,
     home: Option<PathBuf>,
     screenshots_dir: PathBuf,
+    tasks: tasks::Tasks,
+    task_host: Mutex<Option<std::sync::Weak<dyn ComputerHost>>>,
 }
 
 impl ComputerService {
@@ -208,6 +239,8 @@ impl ComputerService {
         home: Option<PathBuf>,
     ) -> Arc<Self> {
         Arc::new(Self {
+            tasks: tasks::Tasks::load(server_dir),
+            task_host: Mutex::new(None),
             helper,
             sessions: Mutex::new(Sessions::default()),
             input: InputMutex::default(),
@@ -216,6 +249,8 @@ impl ComputerService {
             stopped: AtomicBool::new(false),
             session_grants: Mutex::new(HashSet::new()),
             shots: Mutex::new(VecDeque::new()),
+            cursors: cursor::CursorTracker::default(),
+            busy: AtomicUsize::new(0),
             home,
             screenshots_dir: server_dir.join(&CONSTANTS.computer.screenshots_directory),
         })
@@ -232,6 +267,55 @@ impl ComputerService {
             service.sweep_idle(now_ms());
             service.sweep_screenshots(std::time::SystemTime::now());
         });
+        let weak = Arc::downgrade(self);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(CURSOR_TRACK_INTERVAL);
+            let Some(service) = weak.upgrade() else {
+                return;
+            };
+            service.check_user_takeover();
+            service.track_cursors();
+        });
+    }
+
+    /// Keeps each live session's overlay cursor on its target window as the
+    /// window moves, closes, or is covered between actions (see [`cursor`]).
+    fn track_cursors(&self) {
+        let live: HashSet<String> = self
+            .sessions
+            .lock()
+            .map(|s| s.all().into_iter().map(|session| session.id).collect())
+            .unwrap_or_default();
+        if self.cursors.retain(|id| live.contains(id))
+            || self.stopped.load(Ordering::SeqCst)
+            || self.busy.load(Ordering::SeqCst) > 0
+        {
+            return;
+        }
+        let request = ComputerWindowsRequest {
+            app: None,
+            pid: None,
+        };
+        let Ok(windows) = self
+            .helper_call(HelperOp::Windows(request))
+            .and_then(from_value::<Vec<pragma_constants::ComputerWindow>>)
+        else {
+            return;
+        };
+        for (session_id, pointer) in self.cursors.update(&windows) {
+            let mut moved = event(ComputerActivityType::CursorMoved);
+            moved.session_id = Some(session_id);
+            moved.pointer = Some(pointer);
+            self.activity.emit(moved);
+        }
+    }
+
+    /// Makes the host available to background tasks without a reference cycle.
+    pub fn attach_host<H: ComputerHost + 'static>(&self, host: &Arc<H>) {
+        let host: Arc<dyn ComputerHost> = host.clone();
+        if let Ok(mut slot) = self.task_host.lock() {
+            *slot = Some(Arc::downgrade(&host));
+        }
     }
 
     /// Deletes screenshots older than the shipped TTL. Callers that need one
@@ -275,6 +359,7 @@ impl ComputerService {
 
     /// Ends every session a tab owns: the tab closed, or its agent finished.
     pub fn end_tab(&self, tab_id: &str) {
+        self.tasks.cancel_tab(tab_id);
         let ids = self
             .sessions
             .lock()
@@ -286,6 +371,7 @@ impl ComputerService {
     }
 
     fn end_session(&self, id: &str, why: &str) -> Option<ComputerSession> {
+        self.tasks.cancel_session(id);
         let ended = self.sessions.lock().ok()?.end(id)?;
         if let Ok(mut grants) = self.session_grants.lock() {
             grants.remove(&owner_key(&ended.owner));
@@ -309,6 +395,7 @@ impl ComputerService {
             helper: self.helper.status(),
             stopped: self.stopped.load(Ordering::SeqCst),
             last_seq: self.activity.last_seq(),
+            tasks: self.tasks.all(),
         }
     }
 
@@ -323,7 +410,7 @@ impl ComputerService {
 
     /// Dispatches one `computer` RPC.
     pub fn handle_rpc(
-        &self,
+        self: &Arc<Self>,
         host: &dyn ComputerHost,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value, ComputerFailure> {
@@ -334,20 +421,47 @@ impl ComputerService {
             )
         })?;
         let caller = resolve_caller(host, request.caller);
+        self.tasks.check_guard(&caller, request.task.as_ref())?;
+        if caller.kind != ComputerCallerKind::User
+            && !matches!(
+                request.op,
+                ComputerOpRequest::Status
+                    | ComputerOpRequest::Task(_)
+                    | ComputerOpRequest::Permissions(_)
+                    | ComputerOpRequest::Cancel(_)
+            )
+        {
+            self.check_caller_session(&caller)?;
+        }
+        let task_guard = request.task;
         let op = request.op.op();
+        let mut operation = request.op;
+        if caller.kind != ComputerCallerKind::User {
+            keep_in_background(&mut operation);
+        }
         if command_spec(op).desktop_only && caller.kind != ComputerCallerKind::User {
             return Err(failure(
                 ComputerErrorCode::NotAuthorized,
                 "only the Pragma desktop app can do that",
             ));
         }
-        match request.op {
-            ComputerOpRequest::Open(request) => self.open(host, &caller, request),
+        match operation {
+            request @ (ComputerOpRequest::Run(_)
+            | ComputerOpRequest::Resume(_)
+            | ComputerOpRequest::Cancel(_)
+            | ComputerOpRequest::Task(_)) => self.task_rpc(host, &caller, request),
+            ComputerOpRequest::Open(input) => {
+                self.ensure_permission_setup(host, &caller, op)?;
+                self.open(host, &caller, input, task_guard.as_ref())
+            }
             request @ (ComputerOpRequest::Apps(_)
             | ComputerOpRequest::Windows(_)
             | ComputerOpRequest::Displays
             | ComputerOpRequest::Inspect(_)
-            | ComputerOpRequest::Screenshot(_)) => self.read(host, &caller, op, request),
+            | ComputerOpRequest::Screenshot(_)) => {
+                self.ensure_permission_setup(host, &caller, op)?;
+                self.read(host, &caller, op, request)
+            }
             request @ (ComputerOpRequest::Focus(_)
             | ComputerOpRequest::Click(_)
             | ComputerOpRequest::Type(_)
@@ -355,8 +469,9 @@ impl ComputerService {
             | ComputerOpRequest::Scroll(_)
             | ComputerOpRequest::Move(_)
             | ComputerOpRequest::Drag(_)) => {
+                self.ensure_permission_setup(host, &caller, op)?;
                 let action = self.plan(request)?;
-                self.act(host, &caller, op, action)
+                self.act(host, &caller, op, action, task_guard.as_ref())
             }
             request => self.control(host, &caller, request),
         }
@@ -418,7 +533,12 @@ impl ComputerService {
                     window: request.window.clone(),
                     ..ResolveRequest::default()
                 };
-                let description = "Bring to front".to_string();
+                let description = if request.activate == Some(true) {
+                    "Bring to front"
+                } else {
+                    "Focus"
+                }
+                .to_string();
                 Action {
                     target,
                     verb: description,
@@ -552,6 +672,16 @@ impl ComputerService {
                 self.helper_call(HelperOp::Permissions(request))
             }
             ComputerOpRequest::End(request) => {
+                self.tasks.cancel_owner(caller);
+                self.policy.deny_caller(caller);
+                for task in self
+                    .tasks
+                    .all()
+                    .into_iter()
+                    .filter(|t| owner_key(&t.owner) == owner_key(caller))
+                {
+                    self.task_event(&task);
+                }
                 let id = match (&request.session, caller.kind) {
                     (Some(id), ComputerCallerKind::User) => Some(id.clone()),
                     _ => self
@@ -571,6 +701,7 @@ impl ComputerService {
                 ComputerErrorCode::NotAuthorized,
                 "only the Pragma desktop app can read session frames",
             )),
+            ComputerOpRequest::FocusSession(request) => self.focus_session(host, caller, &request),
             ComputerOpRequest::Approve(request) => {
                 let approval = self.policy.answer(&request.approval, request.decision)?;
                 let mut resolved = event(ComputerActivityType::ApprovalResolved);
@@ -598,7 +729,19 @@ impl ComputerService {
                 // without, it is the emergency stop for everything.
                 match request.session {
                     Some(id) => {
-                        self.end_session(&id, "stopped");
+                        self.set_paused(Some(&id), Some(ComputerPauseReason::Stopped));
+                        if let Ok(mut sessions) = self.sessions.lock() {
+                            sessions.stop(&id);
+                        }
+                        self.tasks.cancel_session(&id);
+                        for task in self
+                            .tasks
+                            .all()
+                            .iter()
+                            .filter(|t| t.session_id.as_deref() == Some(&id))
+                        {
+                            self.task_event(task);
+                        }
                     }
                     None => self.stop(),
                 }
@@ -610,6 +753,10 @@ impl ComputerService {
 
     /// The emergency stop: latch, deny every prompt, end every session.
     pub fn stop(&self) {
+        self.tasks.cancel_all();
+        for task in self.tasks.all() {
+            self.task_event(&task);
+        }
         self.stopped.store(true, Ordering::SeqCst);
         self.helper.set_stopped(true);
         self.policy.deny_all();
@@ -638,7 +785,24 @@ impl ComputerService {
             .lock()
             .map(|mut s| s.set_paused(session, reason))
             .unwrap_or_default();
+        if session.is_none() && reason.is_some() && reason != Some(ComputerPauseReason::Stopped) {
+            for task in self.tasks.pause(None) {
+                self.task_event(&task);
+            }
+        }
         for session in changed {
+            self.helper
+                .set_session_paused(&session.id, reason.is_some());
+            if reason.is_some() {
+                self.policy.deny_caller(&session.owner);
+                if reason == Some(ComputerPauseReason::Stopped) {
+                    self.tasks.cancel_owner(&session.owner);
+                } else {
+                    for task in self.tasks.pause(Some(&session.owner)) {
+                        self.task_event(&task);
+                    }
+                }
+            }
             let kind = if reason.is_some() {
                 ComputerActivityType::SessionPaused
             } else {
@@ -654,7 +818,10 @@ impl ComputerService {
 
     fn helper_call(&self, op: HelperOp) -> Result<serde_json::Value, ComputerFailure> {
         let timeout = timeout_for(&op);
-        self.helper.call(op, timeout)
+        self.busy.fetch_add(1, Ordering::SeqCst);
+        let result = self.helper.call(op, timeout);
+        self.busy.fetch_sub(1, Ordering::SeqCst);
+        result
     }
 
     fn resolve(&self, request: ResolveRequest) -> Result<Resolved, ComputerFailure> {
@@ -721,6 +888,43 @@ impl ComputerService {
 
     // -------------------------------------------------------------- policy
 
+    /// Let the desktop collect missing OS grants before resolving any native
+    /// target, including for callers already allowed by Pragma's access policy.
+    fn ensure_permission_setup(
+        &self,
+        host: &dyn ComputerHost,
+        caller: &ComputerCaller,
+        op: ComputerOp,
+    ) -> Result<(), ComputerFailure> {
+        if caller.kind == ComputerCallerKind::User || !host.desktop_connected() {
+            return Ok(());
+        }
+        let settings = self.require_enabled()?;
+        if self.policy.access(&settings, caller) == ComputerAccess::Deny {
+            return Err(failure(
+                ComputerErrorCode::NotAuthorized,
+                format!(
+                    "{} is not allowed to use the computer",
+                    caller_label(caller)
+                ),
+            ));
+        }
+        if command_spec(op).mutating {
+            self.preflight(host)?;
+        }
+        let permissions: ComputerPermissions = from_value(
+            self.helper_call(HelperOp::Permissions(ComputerPermissionsRequest::default()))?,
+        )?;
+        if permissions.supported
+            && permissions.platform == "macos"
+            && (permissions.accessibility != ComputerPermissionState::Granted
+                || permissions.screen_recording != ComputerPermissionState::Granted)
+        {
+            self.request_access(host, caller, op, None, None)?;
+        }
+        Ok(())
+    }
+
     fn require_enabled(&self) -> Result<ComputerUseSettings, ComputerFailure> {
         let settings = self.settings();
         if is_enabled(&settings) {
@@ -773,22 +977,34 @@ impl ComputerService {
                 {
                     return Ok(());
                 }
-                let reason = format!("{} wants to use your computer", caller_label(caller));
-                let approval = approval_for(caller, op, session_id, target, reason, false);
-                match self.ask(host, &approval)? {
-                    Verdict::Allowed {
-                        remember_for_session,
-                    } => {
-                        if remember_for_session {
-                            if let Ok(mut grants) = self.session_grants.lock() {
-                                grants.insert(key);
-                            }
-                        }
-                        Ok(())
-                    }
-                    Verdict::Denied => Err(failure(ComputerErrorCode::Denied, "the user declined")),
-                }
+                self.request_access(host, caller, op, session_id, target)
             }
+        }
+    }
+
+    /// Ask for caller access, remembering a session answer for subsequent calls.
+    fn request_access(
+        &self,
+        host: &dyn ComputerHost,
+        caller: &ComputerCaller,
+        op: ComputerOp,
+        session_id: Option<&str>,
+        target: Option<&ComputerTarget>,
+    ) -> Result<(), ComputerFailure> {
+        let reason = format!("{} wants to use your computer", caller_label(caller));
+        let approval = approval_for(caller, op, session_id, target, reason, false);
+        match self.ask(host, &approval)? {
+            Verdict::Allowed {
+                remember_for_session,
+            } => {
+                if remember_for_session {
+                    if let Ok(mut grants) = self.session_grants.lock() {
+                        grants.insert(owner_key(caller));
+                    }
+                }
+                Ok(())
+            }
+            Verdict::Denied => Err(failure(ComputerErrorCode::Denied, "the user declined")),
         }
     }
 
@@ -810,7 +1026,10 @@ impl ComputerService {
             return Err(offline);
         }
         let activity = Arc::clone(&self.activity);
-        self.policy.wait_for(approval, |approval| {
+        for task in self.tasks.approval_state(&approval.caller, true) {
+            self.task_event(&task);
+        }
+        let verdict = self.policy.wait_for(approval, |approval| {
             let mut requested = event(ComputerActivityType::ApprovalRequested);
             requested.caller = Some(approval.caller.clone());
             requested.session_id.clone_from(&approval.session_id);
@@ -818,7 +1037,21 @@ impl ComputerService {
             requested.target.clone_from(&approval.target);
             requested.approval = Some(approval.clone());
             activity.emit(requested);
-        })
+        });
+        for task in self.tasks.approval_state(&approval.caller, false) {
+            self.task_event(&task);
+        }
+        // An answer resolves the prompt through `approve`; one nobody answered
+        // has to be withdrawn here, or the desktop keeps showing a prompt the
+        // host has already given up on.
+        if verdict.is_err() {
+            let mut expired = event(ComputerActivityType::ApprovalResolved);
+            expired.caller = Some(approval.caller.clone());
+            expired.approval = Some(approval.clone());
+            expired.description = Some("expired".to_string());
+            self.activity.emit(expired);
+        }
+        verdict
     }
 
     // -------------------------------------------------------------- actions
@@ -827,9 +1060,12 @@ impl ComputerService {
         if self.stopped.load(Ordering::SeqCst) {
             let mut stopped = failure(
                 ComputerErrorCode::Stopped,
-                "computer use was stopped by the user",
+                "User stopped computer use. Please ask the user to resume or restart.",
             );
-            stopped.hint = Some("The user can resume it from the Pragma sidebar.".to_string());
+            stopped.hint = Some(
+                "Ask the user to resume computer use in Pragma before restarting the task."
+                    .to_string(),
+            );
             return Err(stopped);
         }
         let settings = self.require_enabled()?;
@@ -844,19 +1080,89 @@ impl ComputerService {
         Ok(settings)
     }
 
-    /// Refuses to act while the user is physically using the machine.
-    fn refuse_if_user_active(&self) -> Result<(), ComputerFailure> {
-        let seconds = self
-            .helper_call(HelperOp::Idle)
+    /// Enforces the desktop pause/restart latch for every caller, including fresh CLI calls.
+    fn check_caller_session(&self, caller: &ComputerCaller) -> Result<(), ComputerFailure> {
+        let session = self
+            .sessions
+            .lock()
             .ok()
-            .and_then(|value| value.get("seconds").and_then(serde_json::Value::as_f64));
-        if seconds.is_some_and(|seconds| seconds < TAKEOVER_WINDOW_SECONDS) {
+            .and_then(|s| s.of(caller).cloned());
+        if let Some(session) = session.filter(|s| s.paused) {
+            let stopped = session.pause_reason == Some(ComputerPauseReason::Stopped);
             return Err(failure(
-                ComputerErrorCode::UserTakeover,
-                "the user is using the keyboard or pointer right now",
+                if stopped {
+                    ComputerErrorCode::Stopped
+                } else {
+                    ComputerErrorCode::UserTakeover
+                },
+                if stopped {
+                    "User stopped the task. Please ask the user to restart in Pragma."
+                } else {
+                    "User paused the task. Please ask the user to resume in Pragma."
+                },
             ));
         }
         Ok(())
+    }
+
+    /// Detects takeover between actions too, including while a model is deciding.
+    fn check_user_takeover(&self) {
+        if self.busy.load(Ordering::SeqCst) > 0 || self.stopped.load(Ordering::SeqCst) {
+            return;
+        }
+        let sessions = self.sessions.lock().map(|s| s.all()).unwrap_or_default();
+        for session in sessions.iter().filter(|s| !s.paused) {
+            for lease in &session.leases {
+                let activity: Option<UserActivity> = self
+                    .helper_call(HelperOp::UserActivity { pid: lease.pid })
+                    .ok()
+                    .and_then(|value| serde_json::from_value(value).ok());
+                if activity.as_ref().is_some_and(is_user_takeover) {
+                    self.set_paused(Some(&session.id), Some(ComputerPauseReason::Takeover));
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Refuses to act while the user is physically working in `app`: typing
+    /// into it, or clicking or scrolling in its window. Input in other apps,
+    /// and pointer movement alone, never count.
+    fn refuse_if_user_active(
+        &self,
+        app: &ComputerApp,
+        session: &str,
+    ) -> Result<(), ComputerFailure> {
+        let activity: Option<UserActivity> = self
+            .helper_call(HelperOp::UserActivity { pid: app.pid })
+            .ok()
+            .and_then(|value| serde_json::from_value(value).ok());
+        let Some(activity) = activity.filter(is_user_takeover) else {
+            return Ok(());
+        };
+        // Name which reading tripped it: a refusal that only says "working in
+        // X" cannot be told apart from the agent's own input being misread.
+        let why = if activity.target_frontmost
+            && activity
+                .keyboard_seconds
+                .is_some_and(|s| s < pragma_core::computer::TAKEOVER_WINDOW_SECONDS)
+        {
+            "typing while it is the frontmost app"
+        } else {
+            "clicking or scrolling in its window"
+        };
+        self.set_paused(Some(session), Some(ComputerPauseReason::Takeover));
+        let mut refused = failure(
+            ComputerErrorCode::UserTakeover,
+            format!(
+                "Task paused: the user is working in {} ({why}). Please ask the user to resume.",
+                app.name
+            ),
+        );
+        if let Ok(serde_json::Value::Object(readings)) = serde_json::to_value(&activity) {
+            refused.details.extend(readings);
+        }
+        Err(refused)
     }
 
     fn open(
@@ -864,6 +1170,7 @@ impl ComputerService {
         host: &dyn ComputerHost,
         caller: &ComputerCaller,
         request: ComputerOpenRequest,
+        task: Option<&tasks::TaskGuard>,
     ) -> Result<serde_json::Value, ComputerFailure> {
         let settings = self.preflight(host)?;
         let name = request.app.clone().unwrap_or_default();
@@ -889,6 +1196,19 @@ impl ComputerService {
             role: None,
         };
         let session = self.begin(host, &settings, caller, ComputerOp::Open, &target)?;
+        self.tasks.check_guard(caller, task)?;
+        // A running app is leased before launch/focus can affect it.
+        if let Ok(resolved) = self.resolve(ResolveRequest {
+            app: request.app.clone(),
+            pid: request.pid,
+            ..ResolveRequest::default()
+        }) {
+            self.refuse_blocked(&resolved.app)?;
+            self.take_lease(&session, &resolved.app)?;
+        }
+        self.preflight(host)?;
+        self.check_caller_session(caller)?;
+        self.tasks.check_guard(caller, task)?;
         let action_id = self.announce(
             &session,
             ComputerOp::Open,
@@ -898,7 +1218,11 @@ impl ComputerService {
         );
         let started = std::time::Instant::now();
         let result: Result<Focused, ComputerFailure> = self
-            .helper_call(HelperOp::Open(request))
+            .helper_call(HelperOp::InSession {
+                session: session.id.clone(),
+                pid: None,
+                action: Box::new(HelperOp::Open(request)),
+            })
             .and_then(from_value);
         let focused = match result {
             Ok(focused) => focused,
@@ -942,6 +1266,7 @@ impl ComputerService {
         caller: &ComputerCaller,
         op: ComputerOp,
         action: Action,
+        task: Option<&tasks::TaskGuard>,
     ) -> Result<serde_json::Value, ComputerFailure> {
         let Action {
             target,
@@ -952,21 +1277,7 @@ impl ComputerService {
         let settings = self.preflight(host)?;
         let resolved = self.resolve(target)?;
         self.refuse_blocked(&resolved.app)?;
-        let label = resolved
-            .element
-            .as_ref()
-            .map(|element| truncate_label(&element.label));
-        let activity_target = ComputerTarget {
-            app_id: Some(resolved.app.id.clone()),
-            app_name: Some(resolved.app.name.clone()),
-            window_id: resolved.window.as_ref().map(|window| window.id.clone()),
-            element_id: resolved.element.as_ref().map(|element| element.id.clone()),
-            element_label: label.clone(),
-            role: resolved
-                .element
-                .as_ref()
-                .map(|element| element.role.clone()),
-        };
+        let activity_target = activity_target(&resolved);
         let session = self.begin(host, &settings, caller, op, &activity_target)?;
         self.approve_sensitive(
             host,
@@ -977,7 +1288,9 @@ impl ComputerService {
             &resolved,
             &activity_target,
         )?;
+        self.tasks.check_guard(caller, task)?;
         self.take_lease(&session, &resolved.app)?;
+        self.refuse_if_user_active(&resolved.app, &session.id)?;
         let spec = command_spec(op);
         let needs_input = match spec.input_lock {
             ComputerInputLock::None => false,
@@ -985,29 +1298,48 @@ impl ComputerService {
             ComputerInputLock::Pointer => method != Some(ComputerMethod::Ax),
         };
         let _input = if needs_input {
-            self.refuse_if_user_active()?;
             Some(self.input.take()?)
         } else {
             None
         };
-        let description = match &label {
+        let description = match &activity_target.element_label {
             Some(label) if !label.is_empty() => format!("{verb} “{label}”"),
             _ => format!("{verb} in {}", resolved.app.name),
         };
-        let action_id = self.announce(
-            &session,
-            op,
-            &activity_target,
-            resolved.point.clone(),
-            description.clone(),
-        );
+        // The overlay draws the cursor inside the target window only, and
+        // hides it where another app covers the point.
+        let pointer = action_pointer(&resolved);
+        self.anchor_cursor(&session.id, &resolved);
+        let action_id = self.announce(&session, op, &activity_target, pointer, description.clone());
         if resolved.point.is_some() {
             // Let the overlay cursor arrive before anything moves.
             std::thread::sleep(Duration::from_millis(CONSTANTS.computer.cursor_lead_ms));
         }
         let started = std::time::Instant::now();
-        let outcome: Result<Performed, ComputerFailure> =
-            self.helper_call(helper_op).and_then(from_value);
+        let outcome: Result<Performed, ComputerFailure> = self
+            .tasks
+            .check_guard(caller, task)
+            .and_then(|()| self.preflight(host))
+            .and_then(|_| {
+                let focus = matches!(helper_op, HelperOp::Focus(_));
+                self.check_caller_session(caller)?;
+                self.refuse_if_user_active(&resolved.app, &session.id)?;
+                let value = self.helper_call(HelperOp::InSession {
+                    session: session.id.clone(),
+                    pid: resolved.app.pid,
+                    action: Box::new(helper_op),
+                })?;
+                if focus {
+                    // `focus` answers with the app and window it ended on.
+                    from_value::<Focused>(value).map(|_| Performed {
+                        method: ComputerMethod::Ax,
+                        physical_cursor: false,
+                        element: None,
+                    })
+                } else {
+                    from_value(value)
+                }
+            });
         match outcome {
             Ok(performed) => {
                 let result = self.completed(
@@ -1022,7 +1354,14 @@ impl ComputerService {
                 );
                 to_value(&result)
             }
-            Err(error) => Err(self.failed(&session, caller, op, &action_id, error)),
+            Err(error) => {
+                if error.code == ComputerErrorCode::UserTakeover
+                    && self.check_caller_session(caller).is_ok()
+                {
+                    self.set_paused(Some(&session.id), Some(ComputerPauseReason::Takeover));
+                }
+                Err(self.failed(&session, caller, op, &action_id, error))
+            }
         }
     }
 
@@ -1048,6 +1387,13 @@ impl ComputerService {
             existing.as_ref().map(|s| s.id.as_str()),
             Some(target),
         )?;
+        let session = self.open_session(caller)?;
+        self.check_caller_session(caller)?;
+        Ok(session)
+    }
+
+    /// Opens one visible session for both direct actions and durable tasks.
+    fn open_session(&self, caller: &ComputerCaller) -> Result<ComputerSession, ComputerFailure> {
         let (session, new) = self
             .sessions
             .lock()
@@ -1059,12 +1405,6 @@ impl ComputerService {
             started.caller = Some(session.owner.clone());
             started.session = Some(session.clone());
             self.activity.emit(started);
-        }
-        if session.paused {
-            return Err(failure(
-                ComputerErrorCode::UserTakeover,
-                "the user paused this session from Pragma",
-            ));
         }
         Ok(session)
     }
@@ -1146,12 +1486,34 @@ impl ComputerService {
         result.map(|_| ())
     }
 
+    /// Anchors `session`'s cursor to the window an action is about to act
+    /// in, so it keeps following that window until the next pointed action.
+    /// Actions with no point (typing, keys) leave it where it was.
+    fn anchor_cursor(&self, session: &str, resolved: &Resolved) {
+        let Some(point) = &resolved.point else {
+            return;
+        };
+        self.cursors.anchor(
+            session,
+            resolved.window.as_ref().map(|window| {
+                (
+                    CursorAnchor::new(&window.id, &window.frame, point),
+                    TrackedCursor {
+                        point: point.clone(),
+                        window: Some(window.frame.clone()),
+                        covered: resolved.covered,
+                    },
+                )
+            }),
+        );
+    }
+
     fn announce(
         &self,
         session: &ComputerSession,
         op: ComputerOp,
         target: &ComputerTarget,
-        point: Option<ComputerPoint>,
+        pointer: Option<ComputerPointer>,
         description: String,
     ) -> String {
         let action_id = format!("ca_{}", uuid::Uuid::new_v4().simple());
@@ -1161,12 +1523,7 @@ impl ComputerService {
         started.caller = Some(session.owner.clone());
         started.op = Some(op);
         started.target = Some(target.clone());
-        started.pointer = point.map(|to| ComputerPointer {
-            from: None,
-            to,
-            display_id: None,
-            lead_ms: CONSTANTS.computer.cursor_lead_ms,
-        });
+        started.pointer = pointer;
         started.description = Some(description);
         self.activity.emit(started);
         action_id
@@ -1231,15 +1588,51 @@ impl ComputerService {
         error
     }
 
-    /// A small JPEG of a session's controlled app, for the desktop's
-    /// picture-in-picture window.
-    fn frame(&self, request: &ComputerFrameRequest) -> Result<serde_json::Value, ComputerFailure> {
-        let lease = self
-            .sessions
+    /// Desktop navigation preserves the agent's ownership and pause state.
+    fn focus_session(
+        &self,
+        host: &dyn ComputerHost,
+        caller: &ComputerCaller,
+        request: &ComputerSessionRequest,
+    ) -> Result<serde_json::Value, ComputerFailure> {
+        if caller.kind != ComputerCallerKind::User {
+            return Err(failure(
+                ComputerErrorCode::NotAuthorized,
+                "only the Pragma desktop app can focus a session's app",
+            ));
+        }
+        self.preflight(host)?;
+        let id = request.session.as_deref().ok_or_else(|| {
+            failure(
+                ComputerErrorCode::InvalidPayload,
+                "a session id is required",
+            )
+        })?;
+        let lease = self.session_lease(id)?;
+        let request = ComputerFocusRequest {
+            app: lease.pid.is_none().then_some(lease.app_key),
+            pid: lease.pid,
+            window: None,
+            activate: Some(true),
+        };
+        let resolved = self.resolve(ResolveRequest {
+            app: request.app.clone(),
+            pid: request.pid,
+            ..ResolveRequest::default()
+        })?;
+        self.refuse_blocked(&resolved.app)?;
+        // This is the user's navigation, not an agent action: keep the
+        // existing lease, pause state, action count and owner intact.
+        self.helper_call(HelperOp::Focus(request))
+    }
+
+    /// The app shown by the preview and brought forward by its arrow.
+    fn session_lease(&self, id: &str) -> Result<pragma_constants::ComputerLease, ComputerFailure> {
+        self.sessions
             .lock()
             .ok()
             .and_then(|s| {
-                s.by_id(&request.session)
+                s.by_id(id)
                     .and_then(|session| session.leases.last().cloned())
             })
             .ok_or_else(|| {
@@ -1247,7 +1640,12 @@ impl ComputerService {
                     ComputerErrorCode::WindowNotFound,
                     "that session is not controlling an app",
                 )
-            })?;
+            })
+    }
+
+    /// A small JPEG of a session's controlled app for the desktop preview.
+    fn frame(&self, request: &ComputerFrameRequest) -> Result<serde_json::Value, ComputerFailure> {
+        let lease = self.session_lease(&request.session)?;
         let shot =
             ComputerScreenshotRequest {
                 app: if lease.pid.is_some() {
@@ -1315,6 +1713,40 @@ fn resolve_caller(host: &dyn ComputerHost, caller: Option<ComputerCaller>) -> Co
     caller
 }
 
+/// Describes the resolved target without exposing field contents.
+fn activity_target(resolved: &Resolved) -> ComputerTarget {
+    let label = resolved
+        .element
+        .as_ref()
+        .map(|element| truncate_label(&element.label));
+    ComputerTarget {
+        app_id: Some(resolved.app.id.clone()),
+        app_name: Some(resolved.app.name.clone()),
+        window_id: resolved.window.as_ref().map(|window| window.id.clone()),
+        element_id: resolved.element.as_ref().map(|element| element.id.clone()),
+        element_label: label.clone(),
+        role: resolved
+            .element
+            .as_ref()
+            .map(|element| element.role.clone()),
+    }
+}
+
+/// Clips the action cursor to its target window, hiding covered points.
+fn action_pointer(resolved: &Resolved) -> Option<ComputerPointer> {
+    resolved.point.clone().map(|to| ComputerPointer {
+        from: None,
+        to,
+        display_id: None,
+        window: resolved.window.as_ref().map(|window| window.frame.clone()),
+        // No window of the target under the point: there is nothing to
+        // clip the cursor to, and drawn unclipped it would float over
+        // whatever app is there, so it is hidden instead.
+        covered: Some(resolved.covered || resolved.window.is_none()),
+        lead_ms: CONSTANTS.computer.cursor_lead_ms,
+    })
+}
+
 fn identity(app: &ComputerApp) -> AppIdentity<'_> {
     AppIdentity {
         bundle_id: app.bundle_id.as_deref(),
@@ -1346,6 +1778,7 @@ fn target_of(
 fn timeout_for(op: &HelperOp) -> Duration {
     let action = Duration::from_millis(CONSTANTS.computer.action_timeout_ms.get());
     match op {
+        HelperOp::InSession { action, .. } => return timeout_for(action),
         HelperOp::Open(request) => {
             Duration::from_millis(
                 request
@@ -1353,9 +1786,13 @@ fn timeout_for(op: &HelperOp) -> Duration {
                     .unwrap_or(CONSTANTS.computer.app_launch_wait_ms.get()),
             ) + action
         }
-        // Long text types in chunks; give it time proportional to its length.
+        // Text is typed one character (a down and an up, ~16 ms) at a time;
+        // give it time proportional to its length.
         HelperOp::Type(request) => {
-            action + Duration::from_millis(u64::try_from(request.text.len()).unwrap_or(0) * 2)
+            action
+                + Duration::from_millis(
+                    u64::try_from(request.text.chars().count()).unwrap_or(0) * 20,
+                )
         }
         HelperOp::Drag(request) => action + Duration::from_millis(request.duration_ms.unwrap_or(0)),
         _ => action,

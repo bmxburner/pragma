@@ -257,6 +257,9 @@ impl Session {
         if let Some(gateway) = gateway_env(server_socket) {
             command.env("PRAGMA_GATEWAY_URL", gateway.url);
             command.env("PRAGMA_GATEWAY_TOKEN", gateway.token);
+            if let Some(token) = gateway.local_token {
+                command.env(&CONSTANTS.computer.local_gateway_token_env, token);
+            }
         }
         if let Some(cli_path) = pragma_cli_path() {
             command.env("PRAGMA_CLI", &cli_path);
@@ -1235,12 +1238,15 @@ fn frame_output_bytes(frame: &EventFrame) -> usize {
 struct GatewayDiscovery {
     port: u16,
     token: String,
+    #[serde(default)]
+    local_token: Option<String>,
     protocol_version: String,
 }
 
 struct GatewayEnv {
     url: String,
     token: String,
+    local_token: Option<String>,
 }
 
 fn gateway_env(server_socket: &str) -> Option<GatewayEnv> {
@@ -1255,6 +1261,7 @@ fn gateway_env(server_socket: &str) -> Option<GatewayEnv> {
     Some(GatewayEnv {
         url: format!("http://127.0.0.1:{}", discovery.port),
         token: discovery.token,
+        local_token: discovery.local_token,
     })
 }
 

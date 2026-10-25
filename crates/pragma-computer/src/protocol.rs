@@ -4,7 +4,7 @@
 //! Requests carry an `id` the response echoes. The operation payloads are the
 //! same `@pragma-sh/constants` request types the `computer` RPC takes, minus
 //! the caller (attribution is the server's job), plus a few helper-only
-//! operations: `resolve`, `stop`, `clearStop`, `idle`, and `ping`. `stop` is
+//! operations: `resolve`, `stop`, `clearStop`, `userActivity`, and `ping`. `stop` is
 //! handled on the reader thread, so it lands while another action is running.
 
 use pragma_constants::{
@@ -46,8 +46,22 @@ pub enum HelperOp {
     Scroll(ComputerScrollRequest),
     Move(ComputerMoveRequest),
     Drag(ComputerDragRequest),
-    /// Seconds since the last physical user input.
-    Idle,
+    /// What the user is physically doing relative to the app `pid`.
+    UserActivity {
+        #[serde(default)]
+        pid: Option<u64>,
+    },
+    /// Runs an action with a session-scoped cancellation guard.
+    InSession {
+        session: String,
+        pid: Option<u64>,
+        action: Box<HelperOp>,
+    },
+    /// Updates a session guard from the reader thread, even during input.
+    SetSessionPaused {
+        session: String,
+        paused: bool,
+    },
     /// Latches the emergency stop. Answered from the reader thread.
     Stop,
     /// Clears the emergency stop.
@@ -59,7 +73,10 @@ impl HelperOp {
     /// behind a running action.
     #[must_use]
     pub fn is_immediate(&self) -> bool {
-        matches!(self, Self::Stop | Self::ClearStop | Self::Ping)
+        matches!(
+            self,
+            Self::Stop | Self::ClearStop | Self::Ping | Self::SetSessionPaused { .. }
+        )
     }
 }
 
@@ -112,6 +129,29 @@ pub struct HelperHello {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_requests_accept_legacy_and_single_grant_prompts() {
+        for (extra, expected) in [
+            ("", None),
+            (
+                r#", "permission":"accessibility""#,
+                Some(pragma_constants::ComputerPermissionKind::Accessibility),
+            ),
+            (
+                r#", "permission":"screenRecording""#,
+                Some(pragma_constants::ComputerPermissionKind::ScreenRecording),
+            ),
+        ] {
+            let line = format!(r#"{{"id":1,"op":"permissions","request":true{extra}}}"#);
+            let request: HelperRequest = serde_json::from_str(&line).unwrap();
+            let HelperOp::Permissions(permissions) = request.op else {
+                panic!("expected permissions")
+            };
+            assert_eq!(permissions.request, Some(true));
+            assert_eq!(permissions.permission, expected);
+        }
+    }
 
     #[test]
     fn requests_round_trip_with_flattened_op() {

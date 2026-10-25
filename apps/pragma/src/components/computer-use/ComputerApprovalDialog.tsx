@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { MousePointer2 } from "lucide-react";
 import { toast } from "sonner";
 
 import type { ComputerApproval } from "@pragma-sh/constants";
 
+import { ComputerPermissionControls } from "@/components/computer-use/ComputerPermissionControls";
 import {
   AlertDialog,
   AlertDialogContent,
@@ -14,8 +15,9 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { useComputerPermissions } from "@/hooks/use-computer-permissions";
 import { errorMessage } from "@/lib/errors";
-import { answerApproval } from "@/state/computer-use-store";
+import { answerApproval, refreshComputerUse } from "@/state/computer-use-store";
 
 /**
  * The prompt an agent's first computer-use request (or a sensitive control,
@@ -24,44 +26,96 @@ import { answerApproval } from "@/state/computer-use-store";
  */
 export function ComputerApprovalDialog({ approvals }: { approvals: ComputerApproval[] }) {
   const approval = approvals[0] ?? null;
+  return approval ? <ComputerApprovalPrompt approval={approval} key={approval.id} /> : null;
+}
+
+function ComputerApprovalPrompt({ approval }: { approval: ComputerApproval }) {
   const [busy, setBusy] = useState(false);
+  const { permissions, needsPermissions, error, requesting, load } = useComputerPermissions();
+  const ready = permissions !== null && !needsPermissions && !error;
+
+  // The host withdraws an unanswered prompt when it expires; re-read the
+  // picture then too, so a missed event never leaves a dead prompt open.
+  const expiresAt = approval.expiresAt;
+  useEffect(() => {
+    const timer = window.setTimeout(
+      () => void refreshComputerUse(),
+      Math.max(0, expiresAt - Date.now()) + 500,
+    );
+    return () => window.clearTimeout(timer);
+  }, [expiresAt]);
 
   const answer = async (decision: "once" | "session" | "always" | "deny") => {
-    if (!approval) return;
     setBusy(true);
     try {
       await answerApproval(approval, decision);
-    } catch (error) {
-      toast.error(`Could not answer: ${errorMessage(error)}`);
+    } catch (cause) {
+      // Most often the request already timed out on the host; drop the prompt.
+      await refreshComputerUse();
+      toast.error(
+        approval.expiresAt <= Date.now()
+          ? "That request already timed out. Ask the agent to try again."
+          : `Could not answer: ${errorMessage(cause)}`,
+      );
     } finally {
       setBusy(false);
     }
   };
 
-  const sensitive = approval?.sensitive ?? false;
-  const target = approval?.target?.appName;
+  const sensitive = approval.sensitive;
+  const target = approval.target?.appName;
 
   return (
-    <AlertDialog open={approval !== null}>
+    <AlertDialog open>
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogMedia>
             <MousePointer2 />
           </AlertDialogMedia>
-          <AlertDialogTitle>{approval?.reason ?? ""}</AlertDialogTitle>
+          <AlertDialogTitle>
+            {needsPermissions ? "Enable computer-use permissions" : approval.reason}
+          </AlertDialogTitle>
           <AlertDialogDescription>
-            {sensitive
-              ? "This control can change or send something. Allow just this one action?"
-              : `It will be able to read the screen and click and type${
-                  target ? ` in ${target}` : ""
-                } while you watch. You can stop it at any time from the sidebar or with the stop shortcut.`}
+            {needsPermissions
+              ? "Before approving this request, allow Accessibility and Screen Recording for Pragma Computer Use in macOS. This popup will continue automatically once both are enabled."
+              : !ready
+                ? "Checking computer-use permissions before continuing."
+                : sensitive
+                  ? "This control can change or send something. Allow just this one action?"
+                  : `It will be able to read the screen and click and type${
+                      target ? ` in ${target}` : ""
+                    } while you watch. You can stop it at any time from the sidebar or with the stop shortcut.`}
           </AlertDialogDescription>
         </AlertDialogHeader>
+        {!ready ? (
+          <div className="flex flex-col gap-4" aria-live="polite">
+            {needsPermissions && permissions ? (
+              <ComputerPermissionControls
+                permissions={permissions}
+                requesting={requesting}
+                request={load}
+              />
+            ) : !error ? (
+              <p className="text-sm text-muted-foreground">Checking permissions…</p>
+            ) : null}
+            {error ? (
+              <p role="alert" className="text-sm text-destructive">
+                {error}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
         <AlertDialogFooter>
           <Button disabled={busy} onClick={() => void answer("deny")} variant="outline">
             Deny
           </Button>
-          {sensitive ? (
+          {!ready ? (
+            error ? (
+              <Button onClick={() => void load()} variant="outline">
+                Check again
+              </Button>
+            ) : null
+          ) : sensitive ? (
             <Button disabled={busy} onClick={() => void answer("once")}>
               Allow once
             </Button>

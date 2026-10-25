@@ -15,6 +15,7 @@ pub mod accounts;
 pub mod ai;
 pub mod cancel;
 pub mod computer;
+pub mod computer_task;
 pub mod exec;
 pub mod fanout;
 pub mod fs;

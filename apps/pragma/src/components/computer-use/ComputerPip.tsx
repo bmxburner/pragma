@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { Maximize2, Minimize2, Minus, MousePointer2, Pause, Play, Square } from "lucide-react";
+import { ArrowUpRight, Minus, MousePointer2, Pause, Play, Square } from "lucide-react";
 import { toast } from "sonner";
 
-import type { ComputerScreenshot, ComputerSession } from "@pragma-sh/constants";
+import { constants, type ComputerScreenshot, type ComputerSession } from "@pragma-sh/constants";
 
+import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
+import { useComputerPermissions } from "@/hooks/use-computer-permissions";
 import { errorMessage } from "@/lib/errors";
-import { computerRpc } from "@/lib/tauri";
+import { computerRpc, streamComputerFrames } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import {
   minimizeComputerPip,
@@ -20,13 +22,8 @@ import {
   type ComputerCursor,
 } from "@/state/computer-use-store";
 
-/** Frame refresh while the panel is visible. */
-const FRAME_INTERVAL_MS = 500;
-/** How much the expanded view zooms in around the agent cursor. */
-const FOLLOW_ZOOM = 2;
 /** Panel sizes in CSS pixels. */
-const COMPACT = { width: 320, height: 236 };
-const EXPANDED = { width: 720, height: 480 };
+const PANEL_SIZE = { width: 320, height: 236 };
 /** Distance kept from the window edges. */
 const MARGIN = 16;
 
@@ -37,8 +34,8 @@ const MARGIN = 16;
  *
  * It floats inside the Pragma window only — never as a separate OS window —
  * and can be dragged anywhere in it by its header. Minimize collapses it to a
- * pill (the sidebar badge brings it back); Expand enlarges it and zooms the
- * view onto the agent cursor, following it as it moves.
+ * pill (the sidebar badge brings it back); the arrow brings the previewed app
+ * to the front.
  */
 export function ComputerPip({ sessions }: { sessions: ComputerSession[] }) {
   const { cursors } = useComputerUse();
@@ -46,13 +43,11 @@ export function ComputerPip({ sessions }: { sessions: ComputerSession[] }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const session = sessions.find((s) => s.id === selectedId) ?? sessions[0] ?? null;
   const cursor = session ? cursors[session.id] : undefined;
-  const [expanded, setExpanded] = useState(false);
-  const size = expanded ? EXPANDED : COMPACT;
+  const size = PANEL_SIZE;
   const { position, startDrag } = useDraggable(size);
-  const frame = useFrame(
+  const { frame, failure } = useFrame(
     minimized ? null : (session?.id ?? null),
-    expanded ? 1280 : 480,
-    cursor?.pulses ?? 0,
+    constants.computer.pipFrameWidth,
   );
 
   if (!session) return null;
@@ -74,36 +69,34 @@ export function ComputerPip({ sessions }: { sessions: ComputerSession[] }) {
 
   return (
     <div
-      className="fixed z-50 flex flex-col overflow-hidden rounded-xl border bg-background text-foreground shadow-2xl transition-[width,height] duration-200"
+      className="fixed z-50 flex flex-col overflow-hidden rounded-xl border bg-background text-foreground shadow-2xl"
       data-testid="computer-pip"
       style={{ left: position.x, top: position.y, width: size.width, height: size.height }}
     >
       <PipHeader
-        expanded={expanded}
-        onExpand={() => setExpanded((value) => !value)}
         onPointerDown={startDrag}
         session={session}
         sessions={sessions}
         setSelectedId={setSelectedId}
       />
       <div className="relative min-h-0 flex-1 overflow-hidden bg-muted">
-        {frame ? (
-          <PipFrame cursor={cursor} follow={expanded} frame={frame} />
-        ) : (
-          <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-            Waiting for the first frame…
-          </div>
-        )}
+        {frame ? <PipFrame cursor={cursor} frame={frame} /> : <PipPlaceholder failure={failure} />}
         {session.paused ? (
           <div className="absolute inset-x-0 bottom-0 bg-warning/90 px-3 py-1 text-center text-xs font-medium text-background">
-            Paused — you're in control
+            {session.pauseReason === "stopped"
+              ? "Task stopped — restart to continue"
+              : "Task paused — you're in control"}
           </div>
         ) : null}
       </div>
       <div className="flex items-center gap-2 border-t px-3 py-1.5 text-xs">
         <MousePointer2 className="size-3 shrink-0 text-primary" />
         <span className="min-w-0 flex-1 truncate">
-          {cursor?.description ?? session.lastDescription ?? "Idle"}
+          {session.paused
+            ? session.pauseReason === "stopped"
+              ? "Task stopped"
+              : "Task paused"
+            : (cursor?.description ?? session.lastDescription ?? "Idle")}
         </span>
         <span className="shrink-0 text-muted-foreground">{session.actionCount} steps</span>
       </div>
@@ -171,21 +164,17 @@ export function clampPosition(
 }
 
 function PipHeader({
-  expanded,
-  onExpand,
   onPointerDown,
   session,
   sessions,
   setSelectedId,
 }: {
-  expanded: boolean;
-  onExpand: () => void;
   onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
   session: ComputerSession;
   sessions: ComputerSession[];
   setSelectedId: (id: string) => void;
 }) {
-  const run = (op: "pause" | "unpause" | "stop") => {
+  const run = (op: "pause" | "unpause" | "stop" | "focusSession") => {
     void controlSession(op, session.id).catch((error: unknown) => toast.error(errorMessage(error)));
   };
   return (
@@ -218,7 +207,12 @@ function PipHeader({
         )}
       </div>
       {session.paused ? (
-        <IconButton label="Resume" onClick={() => run("unpause")} size="icon-xs" variant="ghost">
+        <IconButton
+          label={session.pauseReason === "stopped" ? "Restart" : "Resume"}
+          onClick={() => run("unpause")}
+          size="icon-xs"
+          variant="ghost"
+        >
           <Play />
         </IconButton>
       ) : (
@@ -236,12 +230,13 @@ function PipHeader({
         <Square />
       </IconButton>
       <IconButton
-        label={expanded ? "Shrink" : "Expand to cursor"}
-        onClick={onExpand}
+        disabled={session.leases.length === 0}
+        label="Focus app"
+        onClick={() => run("focusSession")}
         size="icon-xs"
         variant="ghost"
       >
-        {expanded ? <Minimize2 /> : <Maximize2 />}
+        <ArrowUpRight />
       </IconButton>
       <IconButton label="Minimize" onClick={minimizeComputerPip} size="icon-xs" variant="ghost">
         <Minus />
@@ -250,30 +245,18 @@ function PipHeader({
   );
 }
 
-/**
- * The live frame, with the agent cursor drawn where it is. Expanded, the view
- * zooms in and keeps the cursor centred, so it follows the agent around.
- */
+/** The live frame, with the agent cursor drawn where it is. */
 function PipFrame({
   cursor,
-  follow,
   frame,
 }: {
   cursor: ComputerCursor | undefined;
-  follow: boolean;
   frame: ComputerScreenshot;
 }) {
   const position = cursor ? cursorInFrame(cursor, frame) : null;
-  const zoom = follow && position ? FOLLOW_ZOOM : 1;
   return (
     <div className="relative h-full w-full">
-      <div
-        className="absolute inset-0 transition-transform duration-300"
-        style={{
-          transform: `scale(${zoom})`,
-          transformOrigin: position ? `${position.left}% ${position.top}%` : "center",
-        }}
-      >
+      <div className="absolute inset-0">
         <img
           alt="What the agent sees"
           className="h-full w-full object-contain"
@@ -290,6 +273,41 @@ function PipFrame({
   );
 }
 
+/** Stands in for the frame: why there is none yet, and the fix when it is a grant. */
+function PipPlaceholder({ failure }: { failure: FrameFailure | null }) {
+  if (failure?.screenRecordingOff) {
+    return (
+      <div
+        className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-xs"
+        data-testid="computer-pip-screen-recording"
+      >
+        <span className="text-muted-foreground">
+          The preview needs Screen Recording for Pragma Computer Use.
+        </span>
+        <Button onClick={requestScreenRecording} size="sm" variant="outline">
+          Allow Screen Recording
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-1 px-4 text-center text-xs text-muted-foreground">
+      <span>Waiting for the first frame…</span>
+      {failure ? <span className="line-clamp-2 opacity-70">{failure.message}</span> : null}
+    </div>
+  );
+}
+
+/** Shows the macOS prompt, or the System Settings pane once it was answered. */
+function requestScreenRecording() {
+  void computerRpc({ op: "permissions", request: true, permission: "screenRecording" }).catch(
+    (error: unknown) => toast.error(errorMessage(error)),
+  );
+}
+
+/** Why the latest capture produced no frame. */
+type FrameFailure = { message: string; screenRecordingOff: boolean };
+
 /** Where a screen-space cursor falls in a frame, as percentages of its size. */
 export function cursorInFrame(
   cursor: Pick<ComputerCursor, "point">,
@@ -302,38 +320,65 @@ export function cursorInFrame(
   return { left, top };
 }
 
-/** Polls the session's frame while the window is visible, and right after each action. */
-function useFrame(sessionId: string | null, maxWidth: number, pulses: number) {
+/**
+ * Streams the session's frame while the window is visible, and why it has
+ * none when a capture fails. Recheck grants during failures so a stale or
+ * unavailable permission result cannot hide the recovery button indefinitely.
+ */
+function useFrame(sessionId: string | null, maxWidth: number) {
   const [frame, setFrame] = useState<ComputerScreenshot | null>(null);
+  const [failureMessage, setFailureMessage] = useState<string | null>(null);
+  const [visible, setVisible] = useState(document.visibilityState !== "hidden");
+  const { permissions } = useComputerPermissions({
+    enabled: sessionId !== null && visible && failureMessage !== null,
+    pollWhileGranted: true,
+  });
+  const failure: FrameFailure | null =
+    failureMessage === null
+      ? null
+      : {
+          message: failureMessage,
+          screenRecordingOff:
+            (/screen[\s_-]*(?:recording|capture)/i.test(failureMessage) &&
+              /permission|access|denied|not (?:allowed|available)|grant/i.test(failureMessage)) ||
+            (permissions?.platform === "macos" && permissions.screenRecording !== "granted"),
+        };
   useEffect(() => {
-    if (!sessionId) {
-      setFrame(null);
-      return;
-    }
+    const changed = () => setVisible(document.visibilityState !== "hidden");
+    document.addEventListener("visibilitychange", changed);
+    return () => document.removeEventListener("visibilitychange", changed);
+  }, []);
+  useEffect(() => {
+    setFrame(null);
+    setFailureMessage(null);
+    if (!sessionId || !visible) return;
     let cancelled = false;
-    let inFlight = false;
-    const pull = async () => {
-      if (inFlight || document.visibilityState === "hidden") return;
-      inFlight = true;
-      try {
-        const next = await computerRpc<ComputerScreenshot>({
-          op: "frame",
-          session: sessionId,
-          maxWidth,
-        });
-        if (!cancelled) setFrame(next);
-      } catch {
-        // No frame yet (the session has no app, or capture is not allowed).
-      } finally {
-        inFlight = false;
-      }
+    let release: (() => void) | undefined;
+    const failed = (message: string) => {
+      if (cancelled) return;
+      setFrame(null);
+      setFailureMessage(message);
     };
-    void pull();
-    const timer = window.setInterval(() => void pull(), FRAME_INTERVAL_MS);
+    void streamComputerFrames(
+      sessionId,
+      maxWidth,
+      (next) => {
+        if (cancelled) return;
+        setFailureMessage(null);
+        setFrame(next);
+      },
+      failed,
+    )
+      .then((stop) => {
+        if (cancelled) stop();
+        else release = stop;
+        return undefined;
+      })
+      .catch((cause: unknown) => failed(errorMessage(cause)));
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      release?.();
     };
-  }, [sessionId, maxWidth, pulses]);
-  return frame;
+  }, [sessionId, maxWidth, visible]);
+  return { frame, failure };
 }

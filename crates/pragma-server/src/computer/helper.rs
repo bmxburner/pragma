@@ -14,11 +14,14 @@ use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pragma_computer::protocol::{HelperHello, HelperOp, HelperRequest, HelperResponse};
 use pragma_computer::ComputerResult;
-use pragma_constants::{ComputerErrorCode, ComputerHelperState, ComputerHelperStatus, CONSTANTS};
+use pragma_constants::{
+    ComputerErrorCode, ComputerHelperState, ComputerHelperStatus, ComputerPermissionState,
+    ComputerPermissions, CONSTANTS,
+};
 use pragma_core::computer::failure;
 
 /// Something that runs helper operations. The real one is a process; tests
@@ -29,6 +32,8 @@ pub trait Helper: Send + Sync {
     /// Latches (or clears) the helper's emergency stop without queueing
     /// behind a running action.
     fn set_stopped(&self, stopped: bool);
+    /// Interrupts a session's in-flight input without queueing behind it.
+    fn set_session_paused(&self, session: &str, paused: bool);
     /// The helper's health.
     fn status(&self) -> ComputerHelperStatus;
 }
@@ -39,6 +44,40 @@ pub type StatusListener = Arc<dyn Fn(ComputerHelperStatus) + Send + Sync>;
 struct Running {
     child: Child,
     stdin: ChildStdin,
+    reader: std::thread::JoinHandle<()>,
+}
+
+impl Running {
+    fn shutdown(self) {
+        let Self {
+            mut child,
+            stdin,
+            reader,
+        } = self;
+        drop(stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        // Drain the old reader before a replacement can register new requests.
+        let _ = reader.join();
+    }
+}
+
+/// The least time between two permission probes (see [`ProcessHelper::probe`]).
+const PROBE_INTERVAL: Duration = Duration::from_secs(3);
+/// How long a probe may take to answer before it is abandoned.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn should_refresh_permissions(
+    op: &HelperOp,
+    previous: Option<&ComputerPermissions>,
+    idle: bool,
+) -> bool {
+    idle && matches!(op, HelperOp::Permissions(_))
+        && previous.is_some_and(|p| {
+            p.platform == "macos"
+                && (p.accessibility != ComputerPermissionState::Granted
+                    || p.screen_recording != ComputerPermissionState::Granted)
+        })
 }
 
 struct Inner {
@@ -46,6 +85,8 @@ struct Inner {
     status: ComputerHelperStatus,
     /// Consecutive starts that ended in a crash; reset by a successful call.
     crashes: usize,
+    /// When the last permission probe ran.
+    last_probe: Option<Instant>,
 }
 
 /// The supervised helper process.
@@ -88,6 +129,19 @@ fn helper_path() -> PathBuf {
             .join("MacOS")
             .join(&name)
     });
+    let packaged = bare
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(|contents| {
+            contents
+                .join("Helpers")
+                .join(format!("{}.app", CONSTANTS.computer.mac_helper_app_name))
+                .join("Contents/MacOS")
+                .join(&name)
+        });
+    if let Some(path) = packaged.filter(|p| p.is_file()) {
+        return path;
+    }
     match bundled {
         Some(path) if path.is_file() => path,
         _ => bare,
@@ -102,6 +156,7 @@ impl ProcessHelper {
                 running: None,
                 status: status(ComputerHelperState::Stopped, None),
                 crashes: 0,
+                last_probe: None,
             }),
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
@@ -123,7 +178,9 @@ impl ProcessHelper {
             if let Ok(None) = running.child.try_wait() {
                 return Ok(());
             }
-            inner.running = None;
+            if let Some(running) = inner.running.take() {
+                running.shutdown();
+            }
             inner.crashes += 1;
         }
         let backoff = &CONSTANTS.computer.helper_restart_backoff_ms;
@@ -157,6 +214,50 @@ impl ProcessHelper {
         Ok(())
     }
 
+    /// Asks a short-lived second helper (same app, so the same grants) for
+    /// the current permissions; `None` when it does not answer in time.
+    fn probe(&self) -> Option<ComputerPermissions> {
+        let mut child = pragma_platform::process::command(helper_path())
+            .arg("--screenshots-dir")
+            .arg(&self.screenshots_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let mut stdin = child.stdin.take()?;
+        let stdout = child.stdout.take()?;
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            // The hello line, then the answer.
+            let answer = BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+                .find_map(|line| serde_json::from_str::<HelperResponse>(&line).ok());
+            let _ = tx.send(answer);
+        });
+        let request = HelperRequest {
+            id: 0,
+            op: HelperOp::Permissions(pragma_constants::ComputerPermissionsRequest::default()),
+        };
+        let sent = serde_json::to_string(&request).is_ok_and(|line| {
+            writeln!(stdin, "{line}")
+                .and_then(|()| stdin.flush())
+                .is_ok()
+        });
+        let answer = if sent {
+            rx.recv_timeout(PROBE_TIMEOUT).ok().flatten()
+        } else {
+            None
+        };
+        drop(stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        answer
+            .and_then(|response| response.result)
+            .and_then(|value| serde_json::from_value(value).ok())
+    }
+
     fn spawn(&self) -> ComputerResult<Running> {
         let path = helper_path();
         let _ = pragma_platform::perms::create_private_dir(&self.screenshots_dir);
@@ -187,7 +288,7 @@ impl ProcessHelper {
             return Err(unavailable("the computer-use helper did not start"));
         }
         let pending = Arc::clone(&self.pending);
-        std::thread::spawn(move || {
+        let reader = std::thread::spawn(move || {
             for line in lines {
                 let Ok(line) = line else { break };
                 let Ok(response) = serde_json::from_str::<HelperResponse>(&line) else {
@@ -211,7 +312,11 @@ impl ProcessHelper {
                 }
             }
         });
-        Ok(Running { child, stdin })
+        Ok(Running {
+            child,
+            stdin,
+            reader,
+        })
     }
 
     fn send(inner: &mut Inner, request: &HelperRequest) -> ComputerResult<()> {
@@ -229,14 +334,42 @@ impl ProcessHelper {
 
 impl Helper for ProcessHelper {
     fn call(&self, op: HelperOp, timeout: Duration) -> ComputerResult<serde_json::Value> {
+        let permissions = matches!(&op, HelperOp::Permissions(_));
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
+        let process_id;
         {
             let mut inner = self
                 .inner
                 .lock()
                 .map_err(|_| unavailable("helper lock poisoned"))?;
+            let idle = self.pending.lock().is_ok_and(|pending| pending.is_empty());
+            if should_refresh_permissions(&op, inner.status.permissions.as_ref(), idle)
+                && inner
+                    .last_probe
+                    .is_none_or(|at| at.elapsed() >= PROBE_INTERVAL)
+            {
+                // macOS caches a denied grant for the life of a process, so the
+                // live helper cannot see a new one. A restart drops every
+                // element snapshot and background focus, though, and the
+                // preview and Settings check often: ask a fresh process, and
+                // restart only when the grants really changed.
+                inner.last_probe = Some(Instant::now());
+                let changed = self.probe().is_some_and(|fresh| {
+                    inner.status.permissions.as_ref().is_some_and(|known| {
+                        fresh.accessibility != known.accessibility
+                            || fresh.screen_recording != known.screen_recording
+                    })
+                });
+                if changed {
+                    if let Some(running) = inner.running.take() {
+                        running.shutdown();
+                    }
+                    inner.crashes = 0;
+                }
+            }
             self.ensure_running(&mut inner)?;
+            process_id = inner.running.as_ref().map(|running| running.child.id());
             if let Ok(mut pending) = self.pending.lock() {
                 pending.insert(id, tx);
             }
@@ -254,9 +387,10 @@ impl Helper for ProcessHelper {
             // A helper that does not answer is wedged in a native call;
             // restarting it is the only way to get the next call through.
             if let Ok(mut inner) = self.inner.lock() {
-                if let Some(mut running) = inner.running.take() {
-                    let _ = running.child.kill();
-                    let _ = running.child.wait();
+                if inner.running.as_ref().map(|running| running.child.id()) == process_id {
+                    if let Some(running) = inner.running.take() {
+                        running.shutdown();
+                    }
                 }
             }
             return Err(failure(
@@ -266,7 +400,19 @@ impl Helper for ProcessHelper {
         };
         if response.ok {
             if let Ok(mut inner) = self.inner.lock() {
-                inner.crashes = 0;
+                if inner.running.as_ref().map(|running| running.child.id()) == process_id {
+                    inner.crashes = 0;
+                }
+                if permissions
+                    && inner.running.as_ref().map(|running| running.child.id()) == process_id
+                {
+                    let mut next = inner.status.clone();
+                    next.permissions = response
+                        .result
+                        .as_ref()
+                        .and_then(|v| serde_json::from_value(v.clone()).ok());
+                    self.set_status(&mut inner, next);
+                }
             }
             Ok(response.result.unwrap_or(serde_json::Value::Null))
         } else {
@@ -290,6 +436,21 @@ impl Helper for ProcessHelper {
             HelperOp::Stop
         } else {
             HelperOp::ClearStop
+        };
+        let _ = Self::send(&mut inner, &HelperRequest { id, op });
+    }
+
+    fn set_session_paused(&self, session: &str, paused: bool) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        if inner.running.is_none() {
+            return;
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let op = HelperOp::SetSessionPaused {
+            session: session.to_string(),
+            paused,
         };
         let _ = Self::send(&mut inner, &HelperRequest { id, op });
     }
@@ -345,7 +506,49 @@ impl Helper for InProcessHelper {
         }
     }
 
+    fn set_session_paused(&self, session: &str, paused: bool) {
+        self.ctx.stop.set_session_paused(session, paused);
+    }
+
     fn status(&self) -> ComputerHelperStatus {
         status(ComputerHelperState::Ready, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn denied() -> ComputerPermissions {
+        ComputerPermissions {
+            platform: "macos".into(),
+            supported: true,
+            accessibility: ComputerPermissionState::Denied,
+            screen_recording: ComputerPermissionState::Granted,
+        }
+    }
+
+    #[test]
+    fn denied_mac_permissions_are_refreshed_only_between_requests() {
+        let op = HelperOp::Permissions(pragma_constants::ComputerPermissionsRequest::default());
+        assert!(should_refresh_permissions(&op, Some(&denied()), true));
+        assert!(!should_refresh_permissions(&op, Some(&denied()), false));
+        assert!(!should_refresh_permissions(
+            &HelperOp::Ping,
+            Some(&denied()),
+            true
+        ));
+        assert!(!should_refresh_permissions(&op, None, true));
+    }
+
+    #[test]
+    fn granted_and_non_mac_permissions_keep_the_live_helper() {
+        let op = HelperOp::Permissions(pragma_constants::ComputerPermissionsRequest::default());
+        let mut permissions = denied();
+        permissions.accessibility = ComputerPermissionState::Granted;
+        assert!(!should_refresh_permissions(&op, Some(&permissions), true));
+        permissions = denied();
+        permissions.platform = "windows".into();
+        assert!(!should_refresh_permissions(&op, Some(&permissions), true));
     }
 }

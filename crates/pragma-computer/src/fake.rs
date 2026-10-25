@@ -5,30 +5,39 @@
 //! activity) through this, so they run on any platform and in CI without an
 //! accessibility grant or a display.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use base64::Engine as _;
 use pragma_constants::{
     ComputerApp, ComputerAppsRequest, ComputerClickRequest, ComputerDisplay, ComputerDragRequest,
     ComputerElement, ComputerErrorCode, ComputerFocusRequest, ComputerInspectRequest,
     ComputerKeyRequest, ComputerMethod, ComputerMoveRequest, ComputerOpenRequest,
-    ComputerPermissionState, ComputerPermissions, ComputerPoint, ComputerRect, ComputerScreenshot,
-    ComputerScreenshotRequest, ComputerScrollRequest, ComputerSnapshot, ComputerTypeRequest,
-    ComputerWindow, ComputerWindowsRequest,
+    ComputerPermissionState, ComputerPermissions, ComputerPermissionsRequest, ComputerPoint,
+    ComputerRect, ComputerScreenshot, ComputerScreenshotRequest, ComputerScrollRequest,
+    ComputerSnapshot, ComputerTypeRequest, ComputerWindow, ComputerWindowsRequest,
 };
 use pragma_core::computer::{matches_query, rect_center, snapshot_id};
 
 use crate::snapshot::{to_element, RawNode, SnapshotRing};
 use crate::{
-    failure, ComputerBackend, ComputerResult, Context, Focused, Performed, ResolveRequest, Resolved,
+    failure, ComputerBackend, ComputerResult, Context, Focused, Performed, ResolveRequest,
+    Resolved, UserActivity,
 };
 
 /// The fake backend. Clone the [`FakeBackend::log`] handle before moving the
 /// backend into a helper to read what it did.
 #[derive(Default)]
 pub struct FakeBackend {
+    /// Override OS grants to exercise first-use setup through the host.
+    pub permissions: Arc<Mutex<Option<ComputerPermissions>>>,
     /// Every action performed, as `op target` lines.
     pub log: Arc<Mutex<Vec<String>>>,
+    /// While set, the user is typing right now (into whichever app is frontmost).
+    pub typing: Arc<AtomicBool>,
     ring: SnapshotRing<()>,
+    urls: std::collections::HashMap<u64, String>,
+    values: std::collections::HashMap<String, String>,
 }
 
 const TEXTEDIT_PID: u64 = 4242;
@@ -173,7 +182,13 @@ impl FakeBackend {
 }
 
 impl ComputerBackend for FakeBackend {
-    fn permissions(&mut self, _request: bool) -> ComputerResult<ComputerPermissions> {
+    fn permissions(
+        &mut self,
+        _request: &ComputerPermissionsRequest,
+    ) -> ComputerResult<ComputerPermissions> {
+        if let Some(permissions) = self.permissions.lock().ok().and_then(|p| p.clone()) {
+            return Ok(permissions);
+        }
         Ok(ComputerPermissions {
             platform: "fake".to_string(),
             supported: true,
@@ -211,7 +226,15 @@ impl ComputerBackend for FakeBackend {
 
     fn open(&mut self, _ctx: &Context, request: &ComputerOpenRequest) -> ComputerResult<Focused> {
         let app = find_app(request.app.as_deref(), request.pid)?;
-        self.record(format!("open {}", app.name));
+        let front = if request.activate == Some(true) {
+            " to front"
+        } else {
+            ""
+        };
+        self.record(format!("open {}{front}", app.name));
+        if let (Some(pid), Some(url)) = (app.pid, &request.url) {
+            self.urls.insert(pid, url.clone());
+        }
         Ok(Focused {
             window: Some(window_for(&app)),
             app,
@@ -220,7 +243,12 @@ impl ComputerBackend for FakeBackend {
 
     fn focus(&mut self, _ctx: &Context, request: &ComputerFocusRequest) -> ComputerResult<Focused> {
         let app = find_app(request.app.as_deref(), request.pid)?;
-        self.record(format!("focus {}", app.name));
+        let front = if request.activate == Some(true) {
+            " to front"
+        } else {
+            ""
+        };
+        self.record(format!("focus {}{front}", app.name));
         Ok(Focused {
             window: Some(window_for(&app)),
             app,
@@ -235,7 +263,11 @@ impl ComputerBackend for FakeBackend {
         for node in nodes() {
             let label = node.title.clone().unwrap_or_default();
             let index = u32::try_from(elements.len()).unwrap_or(u32::MAX);
-            let element = to_element(seq, index, &node, label, true);
+            let mut element = to_element(seq, index, &node, label, true);
+            element.focused = element.editable;
+            if let Some(value) = self.values.get(&element.key) {
+                element.value = Some(value.clone());
+            }
             if matches_query(&element, query) {
                 elements.push(element);
             }
@@ -253,6 +285,7 @@ impl ComputerBackend for FakeBackend {
             vec![(); elements.len()],
         );
         Ok(ComputerSnapshot {
+            url: self.urls.get(&app.pid.unwrap_or_default()).cloned(),
             id: snapshot_id(seq),
             app,
             window: Some(window),
@@ -269,7 +302,7 @@ impl ComputerBackend for FakeBackend {
     fn screenshot(
         &mut self,
         ctx: &Context,
-        _request: &ComputerScreenshotRequest,
+        request: &ComputerScreenshotRequest,
     ) -> ComputerResult<ComputerScreenshot> {
         // A real 1×1 PNG, so a test that opens the file gets an image; the
         // fake never needs the native capture stack.
@@ -294,7 +327,8 @@ impl ComputerBackend for FakeBackend {
             scale: 2.0,
             format: pragma_constants::ComputerImageFormat::Png,
             bytes: PIXEL.len() as u64,
-            base64: None,
+            base64: (request.base64 == Some(true))
+                .then(|| base64::engine::general_purpose::STANDARD.encode(PIXEL)),
         })
     }
 
@@ -302,6 +336,7 @@ impl ComputerBackend for FakeBackend {
         if let Some(id) = &request.element {
             let (app, element) = self.element(id)?;
             return Ok(Resolved {
+                covered: false,
                 window: Some(window_for(&app)),
                 point: element.frame.as_ref().map(rect_center),
                 element: Some(element),
@@ -310,6 +345,7 @@ impl ComputerBackend for FakeBackend {
         }
         let app = find_app(request.app.as_deref(), request.pid)?;
         Ok(Resolved {
+            covered: false,
             window: Some(window_for(&app)),
             app,
             element: None,
@@ -351,6 +387,10 @@ impl ComputerBackend for FakeBackend {
     ) -> ComputerResult<Performed> {
         ctx.stop.check()?;
         self.record(format!("type {}", request.text));
+        if let Some(id) = &request.element {
+            let (_, element) = self.element(id)?;
+            self.values.insert(element.key, request.text.clone());
+        }
         Ok(Performed {
             method: ComputerMethod::Ax,
             physical_cursor: false,
@@ -406,7 +446,17 @@ impl ComputerBackend for FakeBackend {
         })
     }
 
-    fn seconds_since_user_input(&mut self) -> Option<f64> {
-        None
+    fn user_activity(&mut self, pid: Option<u64>) -> Option<UserActivity> {
+        let typing = self.typing.load(Ordering::SeqCst);
+        let frontmost = apps()
+            .into_iter()
+            .find(|app| app.frontmost)
+            .and_then(|app| app.pid);
+        Some(UserActivity {
+            keyboard_seconds: typing.then_some(0.0),
+            pointer_seconds: None,
+            target_frontmost: pid.is_some() && pid == frontmost,
+            pointer_over_target: false,
+        })
     }
 }

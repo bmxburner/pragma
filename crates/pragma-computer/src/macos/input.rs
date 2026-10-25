@@ -1,14 +1,16 @@
 //! Synthetic input through `CGEvent`, posted at the HID tap.
 //!
-//! HID-tap events move the real cursor and go to whatever is focused, so the
-//! callers activate the target first and verify it is still frontmost. Events
+//! This is the foreground path, for drags and for clicks the background path
+//! (`background`) cannot address: HID-tap events move the real cursor and go
+//! to whatever is focused, so the callers activate the target first and
+//! verify it is still frontmost. Events
 //! come from a *private* event source: the user's held modifiers do not leak
 //! into ours, and ours do not show up in the HID system state that takeover
 //! detection reads.
 //!
-//! Text is typed as Unicode strings in chunks, independent of the keyboard
-//! layout. Chords use ANSI virtual key codes with the character attached, so
-//! menu key equivalents match on the character even on other layouts.
+//! The key-code tables are shared with `background`, which sends every key:
+//! chords use ANSI virtual key codes with the character attached, so menu key
+//! equivalents match on the character even on other layouts.
 
 use std::time::Duration;
 
@@ -17,16 +19,15 @@ use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventTapLocation,
     CGEventType, CGMouseButton, CGScrollEventUnit,
 };
-use pragma_constants::{ComputerErrorCode, ComputerMouseButton, CONSTANTS};
-use pragma_core::computer::{Chord, Key, Modifier, NamedKey};
+use pragma_constants::{ComputerErrorCode, ComputerMouseButton};
+use pragma_core::computer::{Key, Modifier, NamedKey};
 
-use super::ffi;
 use crate::{failure, ComputerResult, StopFlag};
 
 /// Gap between synthetic events, so apps see distinct events.
 const EVENT_GAP: Duration = Duration::from_millis(8);
 
-fn source() -> Option<objc2_core_foundation::CFRetained<CGEventSource>> {
+pub(super) fn source() -> Option<objc2_core_foundation::CFRetained<CGEventSource>> {
     CGEventSource::new(CGEventSourceStateID::Private)
 }
 
@@ -35,7 +36,7 @@ fn post(event: &CGEvent) {
     std::thread::sleep(EVENT_GAP);
 }
 
-fn event_failed() -> pragma_constants::ComputerFailure {
+pub(super) fn event_failed() -> pragma_constants::ComputerFailure {
     failure(
         ComputerErrorCode::Internal,
         "could not create a synthetic input event",
@@ -62,7 +63,9 @@ pub fn move_to(point: CGPoint) -> ComputerResult<()> {
     Ok(())
 }
 
-fn button_events(button: ComputerMouseButton) -> (CGEventType, CGEventType, CGMouseButton) {
+pub(super) fn button_events(
+    button: ComputerMouseButton,
+) -> (CGEventType, CGEventType, CGMouseButton) {
     match button {
         ComputerMouseButton::Left => (
             CGEventType::LeftMouseDown,
@@ -193,49 +196,7 @@ pub fn scroll(stop: &StopFlag, vertical: i32, horizontal: i32) -> ComputerResult
     Ok(())
 }
 
-/// Types `text` as Unicode chunks, checking the stop between chunks.
-pub fn type_text(stop: &StopFlag, text: &str) -> ComputerResult<()> {
-    let source = source();
-    let chunk = usize::try_from(CONSTANTS.computer.type_chunk_units.get())
-        .unwrap_or(20)
-        .min(20);
-    let units: Vec<u16> = text.encode_utf16().collect();
-    for piece in units.chunks(chunk.max(1)) {
-        stop.check()?;
-        for down in [true, false] {
-            let event =
-                CGEvent::new_keyboard_event(source.as_deref(), 0, down).ok_or_else(event_failed)?;
-            ffi::set_unicode(&event, piece);
-            post(&event);
-        }
-    }
-    Ok(())
-}
-
-/// Presses one chord.
-pub fn press(chord: &Chord) -> ComputerResult<()> {
-    let (code, character) = key_code(chord.key).ok_or_else(|| {
-        failure(
-            ComputerErrorCode::InvalidPayload,
-            "that key has no macOS key code",
-        )
-    })?;
-    let flags = flags_for(&chord.modifiers);
-    let source = source();
-    for down in [true, false] {
-        let event =
-            CGEvent::new_keyboard_event(source.as_deref(), code, down).ok_or_else(event_failed)?;
-        CGEvent::set_flags(Some(&event), flags);
-        if let Some(character) = character {
-            let mut buffer = [0u16; 2];
-            ffi::set_unicode(&event, character.encode_utf16(&mut buffer));
-        }
-        post(&event);
-    }
-    Ok(())
-}
-
-fn flags_for(modifiers: &[Modifier]) -> CGEventFlags {
+pub(super) fn flags_for(modifiers: &[Modifier]) -> CGEventFlags {
     let mut flags = CGEventFlags::empty();
     for modifier in modifiers {
         flags |= match modifier {
@@ -249,7 +210,7 @@ fn flags_for(modifiers: &[Modifier]) -> CGEventFlags {
 }
 
 /// The ANSI virtual key code for a key, plus the character to attach.
-fn key_code(key: Key) -> Option<(u16, Option<char>)> {
+pub(super) fn key_code(key: Key) -> Option<(u16, Option<char>)> {
     match key {
         Key::Named(named) => Some((named_code(named)?, None)),
         Key::Char(c) => Some((char_code(c)?, Some(c))),
@@ -343,11 +304,35 @@ fn char_code(c: char) -> Option<u16> {
     })
 }
 
-/// Seconds since the last physical input, from the HID system state.
-pub fn seconds_since_user_input() -> f64 {
-    // `kCGAnyInputEventType` is `~0`.
-    CGEventSource::seconds_since_last_event_type(
-        CGEventSourceStateID::HIDSystemState,
-        CGEventType(u32::MAX),
-    )
+/// Seconds since the most recent physical event of any of `kinds`, from the
+/// HID system state (which our private-source events never touch).
+fn seconds_since(kinds: &[CGEventType]) -> f64 {
+    kinds
+        .iter()
+        .map(|kind| {
+            CGEventSource::seconds_since_last_event_type(
+                CGEventSourceStateID::HIDSystemState,
+                *kind,
+            )
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Seconds since the user last pressed a key.
+pub fn seconds_since_key_press() -> f64 {
+    seconds_since(&[CGEventType::KeyDown])
+}
+
+/// Seconds since the user last clicked, dragged, or scrolled. Moving the
+/// pointer alone is deliberately not counted.
+pub fn seconds_since_pointer_use() -> f64 {
+    seconds_since(&[
+        CGEventType::LeftMouseDown,
+        CGEventType::RightMouseDown,
+        CGEventType::OtherMouseDown,
+        CGEventType::LeftMouseDragged,
+        CGEventType::RightMouseDragged,
+        CGEventType::OtherMouseDragged,
+        CGEventType::ScrollWheel,
+    ])
 }

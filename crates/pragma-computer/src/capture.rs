@@ -114,6 +114,13 @@ pub fn capture(
     target: &CaptureTarget,
     output: &CaptureOutput,
 ) -> ComputerResult<ComputerScreenshot> {
+    #[cfg(target_os = "macos")]
+    let (image, frame) = if crate::macos::supports_screen_capture_kit() {
+        crate::macos::capture_image(target, output.max_width)?
+    } else {
+        grab(target)?
+    };
+    #[cfg(not(target_os = "macos"))]
     let (image, frame) = grab(target)?;
     encode(image, &frame, output)
 }

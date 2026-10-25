@@ -82,6 +82,86 @@ describe("applyComputerMessage", () => {
     expect(state.cursors).toEqual({});
   });
 
+  it("freezes a paused cursor despite late action and tracking events", () => {
+    let state = applyComputerMessage(started(), delta({ type: "sessionStarted", session }));
+    state = applyComputerMessage(
+      state,
+      delta({
+        type: "actionStarted",
+        sessionId: session.id,
+        pointer: { to: { x: 10, y: 20 }, leadMs: 150 },
+      }),
+    );
+    state = applyComputerMessage(
+      state,
+      delta({
+        type: "sessionPaused",
+        sessionId: session.id,
+        session: { ...session, paused: true, pauseReason: "takeover" },
+      }),
+    );
+    for (const type of ["actionStarted", "cursorMoved"] as const) {
+      state = applyComputerMessage(
+        state,
+        delta({ type, sessionId: session.id, pointer: { to: { x: 999, y: 999 }, leadMs: 150 } }),
+      );
+    }
+    expect(state.cursors[session.id]?.point).toEqual({ x: 10, y: 20 });
+    expect(state.snapshot?.sessions[0]?.paused).toBe(true);
+  });
+
+  it("keeps the target window and whether it is covered with the cursor", () => {
+    let state = applyComputerMessage(started(), delta({ type: "sessionStarted", session }));
+    const window = { x: 100, y: 50, w: 400, h: 300 };
+    state = applyComputerMessage(
+      state,
+      delta({
+        type: "actionStarted",
+        sessionId: "cs_1",
+        pointer: { to: { x: 120, y: 60 }, window, covered: true, leadMs: 0 },
+      }),
+    );
+    expect(state.cursors.cs_1?.window).toEqual(window);
+    expect(state.cursors.cs_1?.covered).toBe(true);
+  });
+
+  it("moves the cursor with its window between actions", () => {
+    let state = applyComputerMessage(started(), delta({ type: "sessionStarted", session }));
+    state = applyComputerMessage(
+      state,
+      delta({
+        type: "actionStarted",
+        sessionId: "cs_1",
+        description: "Click “Sign in”",
+        pointer: { to: { x: 120, y: 60 }, window: { x: 100, y: 50, w: 400, h: 300 }, leadMs: 150 },
+      }),
+    );
+    const window = { x: 300, y: 50, w: 400, h: 300 };
+    state = applyComputerMessage(
+      state,
+      delta({
+        type: "cursorMoved",
+        sessionId: "cs_1",
+        pointer: { to: { x: 320, y: 60 }, window, covered: true, leadMs: 0 },
+      }),
+    );
+    expect(state.cursors.cs_1).toMatchObject({
+      point: { x: 320, y: 60 },
+      window,
+      covered: true,
+      tracking: true,
+      description: "Click “Sign in”",
+    });
+  });
+
+  it("ignores cursor tracking for a session with no cursor", () => {
+    const state = applyComputerMessage(
+      started(),
+      delta({ type: "cursorMoved", sessionId: "cs_9", pointer: { to: { x: 1, y: 1 }, leadMs: 0 } }),
+    );
+    expect(state.cursors).toEqual({});
+  });
+
   it("adds and resolves approvals once each", () => {
     const approval = {
       id: "ap_1",

@@ -1339,6 +1339,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     app.manage(Hosts::new(pty.clone(), router));
     app.manage(GitLocks::default());
     app.manage(mini_window::MiniSessions::default());
+    app.manage(computer::ComputerPreviewStreams::default());
     app.manage(plugin_distribution::PluginInstaller::default());
     app.manage(ai::LoginRegistry::default());
     app.manage(ai::AskRegistry::default());
@@ -1655,6 +1656,8 @@ pub fn run() {
             fanouts::restore_fanout_tab,
             fanouts::pick_fanout_member,
             computer::computer_rpc,
+            computer::computer_start_preview,
+            computer::computer_stop_preview,
             ai::ai_generate_pull_request_draft,
             ai::ai_commit_all_and_generate_pull_request_draft,
             ai::ai_inline_edit,

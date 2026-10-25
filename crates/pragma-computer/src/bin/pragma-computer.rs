@@ -21,7 +21,7 @@ fn main() {
         .nth(1)
         .map_or_else(std::env::temp_dir, PathBuf::from);
     let ctx = Context {
-        stop: StopFlag::default(),
+        stop: StopFlag::native(),
         screenshots_dir,
     };
     let hello = HelperHello {

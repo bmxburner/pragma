@@ -46,8 +46,27 @@ export interface ScoreQuestion {
   criteria: Structured[];
 }
 
+/** Experimental image localization. Coordinates are fractions of the image dimensions. */
+export interface BoxQuestion {
+  type: "box";
+  instructions: Structured;
+}
+
 /** Any question the evaluation endpoint accepts. */
-export type Question = NoulQuestion | ChoiceQuestion | ScoreQuestion;
+export type Question = NoulQuestion | ChoiceQuestion | ScoreQuestion | BoxQuestion;
+
+/** PNG/JPEG bytes attached under a reference used in the state or questions. */
+export interface ImageAsset {
+  type: "image";
+  data: Blob | Uint8Array;
+}
+
+/** A validated normalized bounding box. Missing confidence is represented as null. */
+export interface BoxAnswer {
+  type: "box";
+  box: { top: number; bottom: number; left: number; right: number };
+  confidence: number | null;
+}
 
 /** Answer to a {@link NoulQuestion}: `noul` is the probability of "yes". */
 export interface NoulAnswer {
@@ -72,14 +91,16 @@ export interface ScoreAnswer {
 }
 
 /** Any answer the evaluation endpoint returns. */
-export type Answer = NoulAnswer | ChoiceAnswer | ScoreAnswer;
+export type Answer = NoulAnswer | ChoiceAnswer | ScoreAnswer | BoxAnswer;
 
 /** Maps each question type to its answer type. */
 type AnswerFor<Q extends Question> = Q extends NoulQuestion
   ? NoulAnswer
   : Q extends ChoiceQuestion
     ? ChoiceAnswer
-    : ScoreAnswer;
+    : Q extends BoxQuestion
+      ? BoxAnswer
+      : ScoreAnswer;
 
 /** Answers keyed by the ids the questions were asked under. */
 export type Answers<Q extends Record<string, Question>> = { [K in keyof Q]: AnswerFor<Q[K]> };
@@ -111,6 +132,9 @@ export interface EvaluateOptions<Q extends Record<string, Question>> {
   signal?: AbortSignal;
   /** Injected for tests; defaults to the platform `fetch`. */
   fetch?: typeof fetch;
+  /** Images and box questions are disabled unless explicitly opted into. */
+  experimentalImages?: boolean;
+  assets?: Record<string, ImageAsset>;
 }
 
 /** Why a System 1 request failed, so callers can message it precisely. */
@@ -216,6 +240,29 @@ const ANSWER_PARSERS: Record<Question["type"], (raw: Record<string, unknown>) =>
   noul: parseNoul,
   choice: parseChoice,
   score: parseScore,
+  box: (raw) => {
+    if (!isRecord(raw.box)) return null;
+    const top = finite(raw.box.top),
+      bottom = finite(raw.box.bottom);
+    const left = finite(raw.box.left),
+      right = finite(raw.box.right);
+    const confidence = raw.confidence == null ? null : finite(raw.confidence);
+    if (
+      top === null ||
+      bottom === null ||
+      left === null ||
+      right === null ||
+      top < 0 ||
+      left < 0 ||
+      bottom > 1 ||
+      right > 1 ||
+      bottom <= top ||
+      right <= left ||
+      (raw.confidence != null && (confidence === null || confidence < 0 || confidence > 1))
+    )
+      return null;
+    return { type: "box", box: { top, bottom, left, right }, confidence };
+  },
 };
 
 function parseUsage(raw: unknown): { inputTokens: number; outputTokens: number } {
@@ -299,19 +346,17 @@ async function errorDetail(response: Response): Promise<string> {
 async function send(options: EvaluateOptions<Record<string, Question>>): Promise<Response> {
   const { endpoint } = options;
   const doFetch = options.fetch ?? fetch;
+  const encoded = await requestBody(options);
   try {
     return await doFetch(endpointUrl(endpoint.baseUrl, endpoint.evaluatePath), {
       method: "POST",
       headers: {
         authorization: `Bearer ${endpoint.apiKey}`,
-        "content-type": "application/json",
+        "content-type": encoded.contentType,
         accept: "application/json",
+        ...(encoded.images ? { "TypeSafe-Danger-Zone-Images": "true" } : {}),
       },
-      body: JSON.stringify({
-        model: endpoint.model,
-        state: options.state,
-        questions: options.questions,
-      }),
+      body: encoded.body,
       ...(options.signal ? { signal: options.signal } : {}),
     });
   } catch (cause) {
@@ -368,4 +413,66 @@ export async function checkEndpoint(
     ...options,
   });
   return result.model;
+}
+
+async function requestBody(
+  options: EvaluateOptions<Record<string, Question>>,
+): Promise<{ body: BodyInit; contentType: string; images: boolean }> {
+  const payload = {
+    model: options.endpoint.model,
+    state: options.state,
+    questions: options.questions,
+  };
+  const assets = Object.entries(options.assets ?? {});
+  const images =
+    assets.length > 0 || Object.values(options.questions).some((q) => q.type === "box");
+  if (images && !options.experimentalImages)
+    throw new System1Error(
+      "bad-request",
+      "Image and box questions require experimentalImages: true",
+    );
+  if (!assets.length)
+    return { body: JSON.stringify(payload), contentType: "application/json", images };
+  const json = JSON.stringify(payload);
+  const references: Record<string, { type: "image"; part: string }> = {};
+  const parts: { name: string; blob: Blob }[] = [];
+  const decoded = await Promise.all(
+    assets.map(async ([reference, asset]) => ({
+      reference,
+      bytes:
+        asset.data instanceof Blob
+          ? new Uint8Array(await asset.data.arrayBuffer())
+          : asset.data.slice(),
+    })),
+  );
+  for (const { reference, bytes } of decoded) {
+    if (!reference || !json.includes(JSON.stringify(reference).slice(1, -1)))
+      throw new System1Error("bad-request", "Every image reference must appear in the request");
+    const png = [137, 80, 78, 71, 13, 10, 26, 10].every((b, i) => bytes[i] === b);
+    const jpeg = bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
+    if (!png && !jpeg) throw new System1Error("bad-request", "Image assets must be PNG or JPEG");
+    const name = `asset-${parts.length}`;
+    references[reference] = { type: "image", part: name };
+    parts.push({
+      name,
+      blob: new Blob([bytes.slice().buffer], { type: png ? "image/png" : "image/jpeg" }),
+    });
+  }
+  const boundary = `pragma-${crypto.randomUUID()}`;
+  const chunks: BlobPart[] = [];
+  const append = (name: string, type: string, value: BlobPart, filename?: string) => {
+    chunks.push(
+      `--${boundary}\r\nContent-Disposition: form-data; name="${name}"${filename ? `; filename="${filename}"` : ""}\r\nContent-Type: ${type}\r\n\r\n`,
+      value,
+      "\r\n",
+    );
+  };
+  append("request", "application/json", JSON.stringify({ ...payload, assets: references }));
+  for (const { name, blob } of parts) append(name, blob.type, blob, name);
+  chunks.push(`--${boundary}--\r\n`);
+  return {
+    body: new Blob(chunks),
+    contentType: `multipart/form-data; boundary=${boundary}`,
+    images: true,
+  };
 }

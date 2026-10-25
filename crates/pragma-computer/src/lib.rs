@@ -20,18 +20,20 @@
 // boxing each one would cost every call site a conversion for no gain.
 #![allow(clippy::result_large_err)]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use pragma_constants::{
     ComputerApp, ComputerAppsRequest, ComputerClickRequest, ComputerDisplay, ComputerDragRequest,
     ComputerElement, ComputerErrorCode, ComputerFailure, ComputerFocusRequest,
     ComputerInspectRequest, ComputerKeyRequest, ComputerMethod, ComputerMoveRequest,
-    ComputerOpenRequest, ComputerPermissions, ComputerPoint, ComputerScreenshot,
-    ComputerScreenshotRequest, ComputerScrollRequest, ComputerSnapshot, ComputerTypeRequest,
-    ComputerWindow, ComputerWindowsRequest,
+    ComputerOpenRequest, ComputerPermissions, ComputerPermissionsRequest, ComputerPoint,
+    ComputerScreenshot, ComputerScreenshotRequest, ComputerScrollRequest, ComputerSnapshot,
+    ComputerTypeRequest, ComputerWindow, ComputerWindowsRequest,
 };
+pub use pragma_core::computer::UserActivity;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "native")]
@@ -43,6 +45,8 @@ pub mod protocol;
 pub mod serve;
 pub mod snapshot;
 mod unsupported;
+#[cfg(all(feature = "native", target_os = "windows"))]
+mod windows;
 
 pub use pragma_core::computer::failure;
 
@@ -54,36 +58,107 @@ pub type ComputerResult<T> = Result<T, ComputerFailure>;
 /// Shared between the request reader and the worker that performs actions, so
 /// a `stop` line takes effect mid-`type` without waiting for the action to end.
 #[derive(Debug, Clone, Default)]
-pub struct StopFlag(Arc<AtomicBool>);
+pub struct StopFlag {
+    global: Arc<AtomicBool>,
+    sessions: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
+    scope: Option<(Arc<AtomicU64>, u64)>,
+    target_pid: Option<u64>,
+    native_activity: bool,
+}
 
 impl StopFlag {
+    /// Enables physical takeover probes in the native helper, never fake backends.
+    #[must_use]
+    pub fn native() -> Self {
+        Self {
+            native_activity: true,
+            ..Self::default()
+        }
+    }
+
     /// Latches the stop.
     pub fn trip(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.global.store(true, Ordering::SeqCst);
     }
 
     /// Clears the latch so actions may run again.
     pub fn clear(&self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.global.store(false, Ordering::SeqCst);
     }
 
     /// True while the stop is latched.
     #[must_use]
     pub fn is_tripped(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.global.load(Ordering::SeqCst)
     }
 
-    /// Fails with `stopped` when the latch is set. Call between events.
+    /// Pauses one session without interrupting input in other sessions.
+    pub fn set_session_paused(&self, session: &str, paused: bool) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            let epoch = sessions.entry(session.to_string()).or_default();
+            let current = epoch.load(Ordering::SeqCst);
+            // Odd epochs are paused. Resuming never revives an older action.
+            if (current % 2 == 1) != paused {
+                epoch.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// Captures the session generation for one native action.
+    #[must_use]
+    pub fn for_session(&self, session: &str, pid: Option<u64>) -> Self {
+        let epoch = self
+            .sessions
+            .lock()
+            .ok()
+            .map(|mut sessions| Arc::clone(sessions.entry(session.to_string()).or_default()));
+        Self {
+            scope: epoch.map(|epoch| {
+                let generation = epoch.load(Ordering::SeqCst);
+                (epoch, generation)
+            }),
+            target_pid: pid,
+            ..self.clone()
+        }
+    }
+
+    /// Fails when stopped, paused, superseded, or the user takes over the target.
+    /// Native backends call this between input events.
     pub fn check(&self) -> ComputerResult<()> {
         if self.is_tripped() {
             Err(failure(
                 ComputerErrorCode::Stopped,
                 "computer use was stopped by the user",
             ))
+        } else if self.scope.as_ref().is_some_and(|(epoch, generation)| {
+            generation % 2 == 1 || epoch.load(Ordering::SeqCst) != *generation
+        }) {
+            Err(failure(
+                ComputerErrorCode::UserTakeover,
+                "User paused or stopped the task. Please ask the user to resume or restart.",
+            ))
+        } else if self.native_activity && self.target_pid.is_some_and(native_user_takeover) {
+            Err(failure(ComputerErrorCode::UserTakeover,
+                "Task paused: the user clicked or pressed a key in the target app. Please ask the user to resume."))
         } else {
             Ok(())
         }
     }
+}
+
+fn native_user_takeover(pid: u64) -> bool {
+    #[cfg(all(feature = "native", target_os = "macos"))]
+    let activity = Some(macos::user_activity(Some(pid)));
+    #[cfg(all(feature = "native", target_os = "windows"))]
+    let activity = windows::user_activity(Some(pid));
+    #[cfg(not(all(feature = "native", any(target_os = "macos", target_os = "windows"))))]
+    let activity: Option<UserActivity> = {
+        let _ = pid;
+        None
+    };
+    activity
+        .as_ref()
+        .is_some_and(pragma_core::computer::is_user_takeover)
 }
 
 /// What every backend call can see besides its request.
@@ -136,6 +211,10 @@ pub struct Resolved {
     /// Where the pointer would go, when the action has a point.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub point: Option<ComputerPoint>,
+    /// True when another app's window covers `point` (the action still
+    /// reaches the target, in the background).
+    #[serde(default)]
+    pub covered: bool,
 }
 
 /// How an action was performed.
@@ -155,7 +234,10 @@ pub struct Performed {
 /// posts more than one synthetic event checks [`Context::stop`] between them.
 pub trait ComputerBackend {
     /// OS grants for this process, optionally showing the OS prompt.
-    fn permissions(&mut self, request: bool) -> ComputerResult<ComputerPermissions>;
+    fn permissions(
+        &mut self,
+        request: &ComputerPermissionsRequest,
+    ) -> ComputerResult<ComputerPermissions>;
     /// Attached displays.
     fn displays(&mut self) -> ComputerResult<Vec<ComputerDisplay>>;
     /// Running apps, or installed ones.
@@ -201,9 +283,9 @@ pub trait ComputerBackend {
     ) -> ComputerResult<Performed>;
     /// Drags between two points or elements.
     fn drag(&mut self, ctx: &Context, request: &ComputerDragRequest) -> ComputerResult<Performed>;
-    /// Seconds since the last physical (not synthetic) user input, for takeover
-    /// detection. `None` when the platform cannot tell.
-    fn seconds_since_user_input(&mut self) -> Option<f64>;
+    /// What the user is physically (not synthetically) doing relative to the
+    /// app `pid`, for takeover detection. `None` when the platform cannot tell.
+    fn user_activity(&mut self, pid: Option<u64>) -> Option<UserActivity>;
 }
 
 /// Re-runs the helper as its own macOS TCC identity (see `macos/responsible.rs`).
@@ -231,7 +313,11 @@ pub fn native_backend() -> Box<dyn ComputerBackend> {
     {
         Box::new(macos::MacBackend::new())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        Box::new(windows::WindowsBackend::new())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Box::new(unsupported::UnsupportedBackend)
     }
@@ -241,4 +327,29 @@ pub fn native_backend() -> Box<dyn ComputerBackend> {
 #[must_use]
 pub fn platform_name() -> &'static str {
     std::env::consts::OS
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    #[test]
+    fn session_pause_interrupts_only_its_own_action_and_resume_does_not_revive_it() {
+        let stop = StopFlag::default();
+        let action = stop.for_session("one", None);
+        let other = stop.for_session("two", None);
+        assert!(action.check().is_ok());
+        stop.set_session_paused("one", true);
+        assert_eq!(
+            action.check().unwrap_err().code,
+            ComputerErrorCode::UserTakeover
+        );
+        assert!(other.check().is_ok());
+        assert!(stop.for_session("one", None).check().is_err());
+        stop.set_session_paused("one", false);
+        assert!(action.check().is_err());
+        assert!(stop.for_session("one", None).check().is_ok());
+        stop.trip();
+        assert_eq!(other.check().unwrap_err().code, ComputerErrorCode::Stopped);
+    }
 }

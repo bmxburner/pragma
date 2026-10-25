@@ -44,6 +44,27 @@ pub fn run(command: &ComputerCommand, out: &Output) -> Result<(), CliError> {
         ComputerCommand::Move(args) => move_pointer(args, out),
         ComputerCommand::Drag(args) => drag(args, out),
         ComputerCommand::Status(args) => status(args, out),
+        ComputerCommand::Run(args) => {
+            let payload = merge(
+                task_inputs(&args.inputs)?,
+                json!({"instruction":args.instruction,"app":args.app,"requestId":args.request_id.clone().unwrap_or_else(||Uuid::new_v4().to_string())}),
+            );
+            let task = call("run", payload)?;
+            render_task(task, !args.inputs.detach, out)
+        }
+        ComputerCommand::Resume(args) => {
+            let task = call(
+                "resume",
+                merge(
+                    task_inputs(&args.inputs)?,
+                    json!({"taskId":args.task_id,"note":args.note}),
+                ),
+            )?;
+            render_task(task, !args.inputs.detach, out)
+        }
+        ComputerCommand::Cancel { task_id } => {
+            render_task(call("cancel", json!({"taskId":task_id}))?, false, out)
+        }
         ComputerCommand::End => end(out),
         ComputerCommand::Permissions(args) => permissions(args, out),
     }
@@ -371,7 +392,6 @@ fn open(args: &ComputerOpenArgs, out: &Output) -> Result<(), CliError> {
         json!({
             "app": args.app,
             "newInstance": args.new_instance.then_some(true),
-            "activate": args.no_activate.then_some(false),
             "waitReadyMs": args.wait_ready,
             "url": args.url,
             "file": args.file,
@@ -524,12 +544,150 @@ fn end(out: &Output) -> Result<(), CliError> {
 }
 
 fn status(args: &ComputerStatusArgs, out: &Output) -> Result<(), CliError> {
+    if let Some(id) = &args.task_id {
+        return render_task(call("task", json!({"taskId":id}))?, args.wait, out);
+    }
     let status = call("status", json!({}))?;
     render_status(&status, out);
     if args.events {
         stream_events(out)?;
     }
     Ok(())
+}
+
+fn task_inputs(args: &crate::cli::ComputerTaskInputs) -> Result<Value, CliError> {
+    let mut payload = if let Some(path) = &args.inputs_json {
+        let raw = if path == "-" {
+            let mut raw = String::new();
+            std::io::stdin().read_to_string(&mut raw)?;
+            raw
+        } else {
+            std::fs::read_to_string(path)?
+        };
+        serde_json::from_str::<Value>(&raw)
+            .map_err(|_| CliError::config("Expected JSON inputs and secrets maps"))?
+    } else {
+        json!({})
+    };
+    if !payload.is_object() {
+        return Err(CliError::config("Expected JSON inputs and secrets maps"));
+    }
+    for (field, pairs) in [("inputs", &args.inputs), ("secrets", &args.secrets)] {
+        if payload.get(field).is_none() {
+            payload[field] = json!({});
+        }
+        for pair in pairs {
+            let (name, value) = pair
+                .split_once('=')
+                .ok_or_else(|| CliError::config("Task variables must be name=value"))?;
+            if name.is_empty() {
+                return Err(CliError::config("Task variable name is empty"));
+            }
+            payload[field][name] = json!(value);
+        }
+    }
+    if let Some(max) = args.max_steps {
+        payload["budgets"] = json!({"maxSteps":max});
+    }
+    Ok(payload)
+}
+
+fn render_task(mut task: Value, wait: bool, out: &Output) -> Result<(), CliError> {
+    while wait && matches!(task["status"].as_str(), Some("running" | "needsApproval")) {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        task = call("task", json!({"taskId":task["id"]}))?;
+    }
+    out.line(task_message(&task), &task);
+    Ok(())
+}
+
+fn task_message(task: &Value) -> String {
+    let status = match task["status"].as_str().unwrap_or_default() {
+        "needsInput" => "Waiting for input",
+        "needsApproval" => "Waiting for approval in Pragma",
+        "failed" => "Failed",
+        "paused" => "User paused the task. Please ask the user to resume in Pragma.",
+        "cancelled" => "Task stopped. Please ask the user before restarting.",
+        other => other,
+    };
+    let mut lines = vec![format!("{} · {status}", text(task, "id"))];
+    if let Some(code) = task["code"].as_str().filter(|_| task["status"] == "failed") {
+        lines.push(format!("Reason: {} ({code})", task_reason(code)));
+    }
+    for field in ["summary", "question"] {
+        if let Some(message) = task[field].as_str().filter(|s| !s.is_empty()) {
+            lines.push(message.to_string());
+        }
+    }
+    let inputs: Vec<&Value> = task["requestedInputs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .collect();
+    for input in &inputs {
+        lines.push(format!(
+            "Required input: {} — {}",
+            text(input, "name"),
+            text(input, "label")
+        ));
+        if let Some(options) = input["options"].as_array().filter(|o| !o.is_empty()) {
+            lines.push(format!(
+                "Choose one of: {}",
+                options
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    if task["resumable"] == true {
+        lines.push(task_resume_command(task, &inputs));
+    }
+    lines.join("\n")
+}
+
+fn task_resume_command(task: &Value, inputs: &[&Value]) -> String {
+    let base = format!("Resume: pragma-cli computer resume {}", text(task, "id"));
+    if inputs.iter().any(|input| {
+        input["secret"] == true
+            || !text(input, "name")
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    }) {
+        return format!(
+            "{base} --inputs-json -\nProvide the requested inputs and secrets as JSON on stdin."
+        );
+    }
+    if inputs.is_empty() {
+        return format!("{base} --note '<clarification>'\nIf the next step needs typing, supply the exact text or URL with --input 'name=value'.");
+    }
+    // Only simple names enter the suggested command; values stay placeholders.
+    let mut command = base;
+    for input in inputs {
+        command.push_str(" --input '");
+        command.push_str(&text(input, "name"));
+        command.push_str("=<value>'");
+    }
+    command
+}
+
+fn task_reason(code: &str) -> &str {
+    match code {
+        "lowConfidence" => "Jev could not choose a safe next action with enough confidence",
+        "missingInput" => "The agent needs caller-supplied text or a URL",
+        "ambiguousTarget" => "Jev could not identify the intended control",
+        "modelUnavailable" => {
+            "The computer-use model is unavailable; check the System 1 connection in Settings"
+        }
+        "modelError" => "The computer-use model request failed",
+        "stuck" => "The agent could not make progress",
+        "limitSteps" => "The task reached its step limit",
+        "limitTime" => "The task reached its time limit",
+        "limitModelCalls" => "The task reached its model-call limit",
+        "interrupted" => "The host restarted before the task finished",
+        _ => "The task stopped before completing; inspect the target app",
+    }
 }
 
 fn render_status(status: &Value, out: &Output) {
@@ -649,5 +807,51 @@ mod tests {
         );
         assert!(parse_region("1,2,3").is_err());
         assert!(parse_region("a,b,c,d").is_err());
+    }
+
+    #[test]
+    fn task_failures_show_the_reason_and_a_recovery_command() {
+        let message = task_message(
+            &json!({"id":"ct_test","status":"failed","code":"lowConfidence","resumable":true}),
+        );
+        assert!(message.contains("Failed\nReason: Jev could not choose a safe next action with enough confidence (lowConfidence)"));
+        assert!(message.contains("pragma-cli computer resume ct_test --note '<clarification>'"));
+        assert!(message.contains("exact text or URL"));
+    }
+
+    #[test]
+    fn text_handoffs_show_the_required_input_instead_of_a_failure() {
+        let message = task_message(
+            &json!({"id":"ct_text","status":"needsInput","resumable":true,
+            "summary":"The agent will type the text after you resume.","question":"What exact text should the agent type?",
+            "requestedInputs":[{"name":"text","label":"text","secret":false,"kind":"text"}]}),
+        );
+        assert!(message.contains("Waiting for input"));
+        assert!(message.contains("What exact text should the agent type?"));
+        assert!(message.contains("--input 'text=<value>'"));
+        assert!(!message.contains("Failed"));
+    }
+
+    #[test]
+    fn user_paused_and_stopped_tasks_ask_for_explicit_recovery() {
+        let paused = task_message(&json!({"id":"ct_paused","status":"paused","resumable":true}));
+        assert!(paused.contains("User paused the task. Please ask the user to resume in Pragma."));
+        assert!(paused.contains("pragma-cli computer resume ct_paused"));
+        let stopped =
+            task_message(&json!({"id":"ct_stopped","status":"cancelled","resumable":false}));
+        assert!(stopped.contains("Please ask the user before restarting"));
+        assert!(!stopped.contains("Resume:"));
+    }
+
+    #[test]
+    fn secret_and_non_shell_input_names_use_stdin_handoffs() {
+        for input in [
+            json!({"name":"password","secret":true}),
+            json!({"name":"$(example)","secret":false}),
+        ] {
+            let command = task_resume_command(&json!({"id":"ct_secret"}), &[&input]);
+            assert!(command.contains("--inputs-json -"));
+            assert!(!command.contains("--input '"));
+        }
     }
 }

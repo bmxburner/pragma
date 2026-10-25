@@ -65,6 +65,7 @@ pub fn read_node(element: &Element, path: Vec<u64>, ancestor_roles: Vec<String>)
         focused: ffi::boolean(element, "AXFocused").unwrap_or(false),
         editable,
         secure,
+        offscreen: false,
         actions,
         path,
         ancestor_roles,

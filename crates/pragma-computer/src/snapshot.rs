@@ -33,6 +33,8 @@ pub struct RawNode {
     pub focused: bool,
     pub editable: bool,
     pub secure: bool,
+    /// The platform explicitly reports this element as offscreen.
+    pub offscreen: bool,
     pub actions: Vec<String>,
     pub path: Vec<u64>,
     pub ancestor_roles: Vec<String>,

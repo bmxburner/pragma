@@ -172,6 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         workspace_root(),
     ));
     let core = Arc::new(Core::new(&paths.dir)?);
+    registry.computer().attach_host(&registry);
     start_watcher_reconciler(&registry);
     start_viewport_lease_sweeper(&registry);
     start_account_token_sync(&registry);
@@ -293,12 +294,22 @@ fn handle_client(mut stream: LocalStream, registry: &Arc<Registry>, core: &Arc<C
         return;
     };
     if matches!(first.kind, RequestKind::RegisterController) {
-        // The app registered as the single controller. The controller's
-        // `ControlResult` replies are read on this same connection thread and
-        // routed to waiting CLI waiters by `request_id`.
-        let _ = registry.register_controller(Arc::clone(&writer));
-        controller_reply_loop(&mut stream, registry);
-        registry.clear_controller();
+        // Only the newest desktop handles controls; earlier connections remain
+        // available if it closes. Cleanup must remove this exact connection.
+        let result = registry.register_controller(Arc::clone(&writer));
+        let registered = result.is_ok();
+        let response = ServerFrame::Response(ResponseFrame {
+            request_id: first.request_id,
+            ok: registered,
+            error: result.err().map(|error| error.to_string()),
+        });
+        let acknowledged = writer
+            .lock()
+            .is_ok_and(|mut writer| write_frame_or_hang_up(&mut writer, &response));
+        if registered && acknowledged {
+            controller_reply_loop(&mut stream, registry);
+        }
+        registry.clear_controller(&writer);
         let _ = stream.shutdown(Shutdown::Both);
         return;
     }
@@ -1642,11 +1653,146 @@ fn take_socket_path(socket: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Shutdown;
+    use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use super::{acquire_lock, take_socket_path};
-    use pragma_platform::ipc::LocalListener;
+    use pragma_core::Core;
+    use pragma_platform::ipc::{LocalListener, LocalStream};
+    use pragma_protocol::{
+        read_json_frame, write_json_frame, ControlMethod, ControlRequest, ControlResult,
+        RequestFrame, RequestKind, ServerFrame,
+    };
+
+    use super::{acquire_lock, handle_client, take_socket_path, Registry};
+
+    fn request(kind: RequestKind) -> RequestFrame {
+        RequestFrame {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            kind,
+            session_id: None,
+            worktree_id: None,
+            cwd: None,
+            cols: None,
+            rows: None,
+            data: None,
+            shell: None,
+            rpc: None,
+            subscription: None,
+            control: None,
+            control_result: None,
+            env: None,
+        }
+    }
+
+    fn desktop_connection(
+        registry: &Arc<Registry>,
+        core: &Arc<Core>,
+    ) -> (LocalStream, thread::JoinHandle<()>) {
+        let (mut client, server) = LocalStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let registry = Arc::clone(registry);
+        let core = Arc::clone(core);
+        let serving = thread::spawn(move || handle_client(server, &registry, &core));
+        assert!(matches!(
+            read_json_frame::<ServerFrame>(&mut client).unwrap(),
+            ServerFrame::Hello(_)
+        ));
+        let request = request(RequestKind::RegisterController);
+        write_json_frame(&mut client, &request).unwrap();
+        let ServerFrame::Response(registered) = read_json_frame(&mut client).unwrap() else {
+            panic!("controller registration must be acknowledged");
+        };
+        assert!(registered.ok);
+        assert_eq!(registered.request_id, request.request_id);
+        (client, serving)
+    }
+
+    fn disconnect_desktop((client, serving): (LocalStream, thread::JoinHandle<()>)) {
+        client.shutdown(Shutdown::Both).unwrap();
+        drop(client);
+        serving.join().unwrap();
+    }
+
+    #[test]
+    fn desktop_connections_survive_both_orders_of_disconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(Registry::new(
+            dir.path().join("daemon.sock"),
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        ));
+        let core = Arc::new(Core::new(dir.path()).unwrap());
+        let original = desktop_connection(&registry, &core);
+        let mut replacement = desktop_connection(&registry, &core);
+
+        // The older app closes after the replacement registered.
+        disconnect_desktop(original);
+        assert!(
+            registry
+                .computer()
+                .snapshot(registry.as_ref())
+                .desktop_connected
+        );
+
+        // A temporary newer app closes, leaving that replacement alive.
+        let temporary = desktop_connection(&registry, &core);
+        disconnect_desktop(temporary);
+        assert!(
+            registry
+                .computer()
+                .snapshot(registry.as_ref())
+                .desktop_connected
+        );
+
+        // Broker a real wire request to the surviving desktop, not just a
+        // registry pointer that looks connected but cannot handle controls.
+        let (mut caller, server) = LocalStream::pair().unwrap();
+        caller
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let server_registry = Arc::clone(&registry);
+        let serving = thread::spawn(move || handle_client(server, &server_registry, &core));
+        let _: ServerFrame = read_json_frame(&mut caller).unwrap();
+        let mut control = request(RequestKind::Control);
+        control.control = Some(ControlRequest {
+            method: ControlMethod::WorktreesList,
+            payload: serde_json::json!({}),
+        });
+        write_json_frame(&mut caller, &control).unwrap();
+        let ServerFrame::Control(forwarded) = read_json_frame(&mut replacement.0).unwrap() else {
+            panic!("surviving desktop must receive the control");
+        };
+        assert_eq!(forwarded.request_id, control.request_id);
+        let mut reply = request(RequestKind::ControlResult);
+        reply.request_id = forwarded.request_id;
+        reply.control_result = Some(ControlResult {
+            ok: true,
+            payload: Some(serde_json::json!({"survivingDesktop":true})),
+            error: None,
+        });
+        write_json_frame(&mut replacement.0, &reply).unwrap();
+        let ServerFrame::ControlResult(result) = read_json_frame(&mut caller).unwrap() else {
+            panic!("caller must receive the desktop reply");
+        };
+        assert!(result.ok);
+        assert_eq!(
+            result.payload,
+            Some(serde_json::json!({"survivingDesktop":true}))
+        );
+        caller.shutdown(Shutdown::Both).unwrap();
+        serving.join().unwrap();
+        disconnect_desktop(replacement);
+        assert!(
+            !registry
+                .computer()
+                .snapshot(registry.as_ref())
+                .desktop_connected
+        );
+    }
 
     #[test]
     fn a_second_server_cannot_take_a_held_lock() {

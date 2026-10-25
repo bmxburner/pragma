@@ -1,13 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
-import { toast } from "sonner";
+import { useCallback } from "react";
 
-import type {
-  ComputerAccess,
-  ComputerPermissions,
-  ComputerUseSettings,
-} from "@pragma-sh/constants";
+import type { ComputerAccess, ComputerUseSettings } from "@pragma-sh/constants";
 
 import { SettingsCard } from "@/components/settings/SettingsCard";
+import { ComputerPermissionControls } from "@/components/computer-use/ComputerPermissionControls";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import {
@@ -18,9 +14,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { errorMessage } from "@/lib/errors";
+import { useComputerPermissions } from "@/hooks/use-computer-permissions";
 import { isMacPlatform } from "@/lib/platform";
-import { computerRpc } from "@/lib/tauri";
 import { controlSession, useComputerUse } from "@/state/computer-use-store";
 
 const ACCESS_LABELS: Record<ComputerAccess, string> = {
@@ -65,7 +60,7 @@ export function ComputerUseSection({
     <div className="space-y-5">
       <SettingsCard
         title="Computer use"
-        description="Let agents read the screen and click and type in other apps on this Mac. You always see what they do, and you can stop them at any time."
+        description="Let agents read the screen and click and type in other apps on this computer. You always see what they do, and you can stop them at any time."
         actions={
           <Switch
             aria-label="Enable computer use"
@@ -114,7 +109,7 @@ export function ComputerUseSection({
 
       <SettingsCard
         title="Seeing and stopping"
-        description="While an agent is in control, its cursor is drawn on screen and a small window shows what it is doing."
+        description="While an agent is in control, its cursor is drawn on screen and a small panel in Pragma shows what it is doing."
       >
         <div className="mt-4 space-y-4">
           <div className="flex items-center justify-between gap-4">
@@ -176,17 +171,9 @@ function AccessRow({
   );
 }
 
-/** The helper's macOS permissions, with a button that shows the OS prompts. */
+/** The helper's macOS permissions, with separate buttons for the OS prompts. */
 function PermissionsCard() {
-  const [permissions, setPermissions] = useState<ComputerPermissions | null>(null);
-  const load = useCallback(async (request: boolean) => {
-    try {
-      setPermissions(await computerRpc<ComputerPermissions>({ op: "permissions", request }));
-    } catch (error) {
-      toast.error(`Could not read permissions: ${errorMessage(error)}`);
-    }
-  }, []);
-  useEffect(() => void load(false), [load]);
+  const { permissions, error, requesting, load } = useComputerPermissions();
 
   if (permissions && !permissions.supported) {
     return (
@@ -196,26 +183,35 @@ function PermissionsCard() {
       />
     );
   }
-  const granted =
-    permissions?.accessibility === "granted" && permissions.screenRecording === "granted";
+  if (permissions?.platform === "windows") {
+    return (
+      <SettingsCard
+        title="Permissions"
+        description="Windows allows control of ordinary desktop apps. Elevated apps and the secure desktop are off limits. Keyboard and pointer input may bring the target app to the front."
+      />
+    );
+  }
   return (
     <SettingsCard
       title="Permissions"
       description="macOS asks once for each. They belong to Pragma's computer-use helper."
-      actions={
-        granted ? null : (
-          <Button onClick={() => void load(true)} size="sm" variant="outline">
-            Request access
-          </Button>
-        )
-      }
     >
-      <dl className="mt-4 grid grid-cols-[1fr_auto] gap-y-2 text-sm">
-        <dt>Accessibility</dt>
-        <dd className="text-muted-foreground">{permissions?.accessibility ?? "…"}</dd>
-        <dt>Screen Recording</dt>
-        <dd className="text-muted-foreground">{permissions?.screenRecording ?? "…"}</dd>
-      </dl>
+      <div className="mt-4">
+        {permissions ? (
+          <ComputerPermissionControls
+            permissions={permissions}
+            requesting={requesting}
+            request={load}
+          />
+        ) : (
+          <p className="text-sm text-muted-foreground">Checking permissions…</p>
+        )}
+        {error ? (
+          <p role="alert" className="mt-3 text-sm text-destructive">
+            {error}
+          </p>
+        ) : null}
+      </div>
     </SettingsCard>
   );
 }

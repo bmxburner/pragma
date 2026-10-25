@@ -144,11 +144,20 @@ impl Sessions {
             .filter(|s| session_id.is_none_or(|id| s.id == id))
             .filter(|s| s.paused != reason.is_some() || s.pause_reason != reason)
             .map(|s| {
+                if s.pause_reason == Some(ComputerPauseReason::Stopped) && reason.is_none() {
+                    // Stopped leases remain as preview metadata until the user restarts.
+                    s.leases.clear();
+                }
                 s.paused = reason.is_some();
                 s.pause_reason = reason;
                 s.clone()
             })
             .collect()
+    }
+
+    /// Releases a stopped session's leases but keeps its user-owned restart latch.
+    pub fn stop(&mut self, id: &str) {
+        self.leases.release_session(id);
     }
 
     /// Ends a session and releases its leases.
@@ -172,7 +181,7 @@ impl Sessions {
     pub fn idle(&self, now: u64, idle_ms: u64) -> Vec<String> {
         self.by_owner
             .values()
-            .filter(|s| now.saturating_sub(s.last_action_at) >= idle_ms)
+            .filter(|s| !s.paused && now.saturating_sub(s.last_action_at) >= idle_ms)
             .map(|s| s.id.clone())
             .collect()
     }

@@ -392,6 +392,64 @@ pub fn is_idle(last_action_at: i64, now: i64, idle_ms: i64) -> bool {
     now.saturating_sub(last_action_at) >= idle_ms
 }
 
+/// The macOS `AXMenuItemCmdModifiers` mask a menu item carries for `chord`,
+/// when the chord is a menu shortcut (it holds Command or Control): Shift 1,
+/// Option 2, Control 4, and 8 when Command is *not* held.
+#[must_use]
+pub fn ax_menu_modifiers(chord: &Chord) -> Option<i64> {
+    let held = |modifier| chord.modifiers.contains(&modifier);
+    if !held(Modifier::Cmd) && !held(Modifier::Ctrl) {
+        return None;
+    }
+    let mut mask = 0;
+    if held(Modifier::Shift) {
+        mask |= 1;
+    }
+    if held(Modifier::Alt) {
+        mask |= 2;
+    }
+    if held(Modifier::Ctrl) {
+        mask |= 4;
+    }
+    if !held(Modifier::Cmd) {
+        mask |= 8;
+    }
+    Some(mask)
+}
+
+// ------------------------------------------------------------------ takeover
+
+/// Deliberate physical input this recent, aimed at the target, is the user
+/// working in it right now.
+pub const TAKEOVER_WINDOW_SECONDS: f64 = 1.0;
+
+/// What the user is physically doing, relative to the app an action targets.
+///
+/// Only deliberate input counts: key presses, and clicks, drags, and scrolls.
+/// Merely moving the pointer never does, and neither does input that lands in
+/// another app.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserActivity {
+    /// Seconds since the last physical key press; `None` when unknown.
+    pub keyboard_seconds: Option<f64>,
+    /// Seconds since the last physical click, drag, or scroll; `None` when unknown.
+    pub pointer_seconds: Option<f64>,
+    /// Whether the target app is frontmost, so the user's keystrokes reach it.
+    pub target_frontmost: bool,
+    /// Whether the topmost window under the pointer belongs to the target app.
+    pub pointer_over_target: bool,
+}
+
+/// True when the user is working in the target app right now: typing while it
+/// is frontmost, or clicking, dragging, or scrolling in its window.
+#[must_use]
+pub fn is_user_takeover(activity: &UserActivity) -> bool {
+    let recent = |seconds: Option<f64>| seconds.is_some_and(|s| s < TAKEOVER_WINDOW_SECONDS);
+    (activity.target_frontmost && recent(activity.keyboard_seconds))
+        || (activity.pointer_over_target && recent(activity.pointer_seconds))
+}
+
 // ------------------------------------------------------------------ chords
 
 /// A modifier key. `Mod` is resolved to `Cmd` on macOS and `Ctrl` elsewhere.
@@ -559,6 +617,39 @@ pub fn rect_center(rect: &ComputerRect) -> ComputerPoint {
     }
 }
 
+/// The overlap of two rectangles, if they overlap at all.
+#[must_use]
+pub fn rect_intersection(a: &ComputerRect, b: &ComputerRect) -> Option<ComputerRect> {
+    let x = a.x.max(b.x);
+    let y = a.y.max(b.y);
+    let right = (a.x + a.w).min(b.x + b.w);
+    let bottom = (a.y + a.h).min(b.y + b.h);
+    (right > x && bottom > y).then(|| ComputerRect {
+        x,
+        y,
+        w: right - x,
+        h: bottom - y,
+        display_id: a.display_id.clone(),
+    })
+}
+
+/// Where to act on an element: the centre of the part of it that is actually
+/// visible inside every clip around it (its scroll view, its window).
+///
+/// A text area or a long list is often far taller than the view showing it,
+/// so the centre of its whole frame can lie below the window, where a click
+/// lands in another app and the overlay cursor floats over it. `None` when
+/// none of it is visible.
+#[must_use]
+pub fn visible_center(frame: &ComputerRect, clips: &[ComputerRect]) -> Option<ComputerPoint> {
+    clips
+        .iter()
+        .try_fold(frame.clone(), |visible, clip| {
+            rect_intersection(&visible, clip)
+        })
+        .map(|visible| rect_center(&visible))
+}
+
 /// True when `point` lies inside `rect` (edges inclusive).
 #[must_use]
 pub fn rect_contains(rect: &ComputerRect, point: &ComputerPoint) -> bool {
@@ -566,6 +657,62 @@ pub fn rect_contains(rect: &ComputerRect, point: &ComputerPoint) -> bool {
         && point.y >= rect.y
         && point.x <= rect.x + rect.w
         && point.y <= rect.y + rect.h
+}
+
+/// Where the overlay cursor sits, relative to the window it acted in, so it
+/// can follow that window after the action.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CursorAnchor {
+    pub window_id: String,
+    /// The cursor's offset from the window's top-left corner.
+    pub dx: f64,
+    pub dy: f64,
+}
+
+impl CursorAnchor {
+    /// Anchors `point` to `window`.
+    #[must_use]
+    pub fn new(window_id: &str, window: &ComputerRect, point: &ComputerPoint) -> Self {
+        Self {
+            window_id: window_id.to_string(),
+            dx: point.x - window.x,
+            dy: point.y - window.y,
+        }
+    }
+}
+
+/// Where an anchored cursor is now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackedCursor {
+    pub point: ComputerPoint,
+    /// The window's current frame; `None` once it is gone (closed, minimized,
+    /// or its app hidden), and the cursor is hidden with it.
+    pub window: Option<ComputerRect>,
+    /// Another window is in front of the cursor's point.
+    pub covered: bool,
+}
+
+/// Re-places an anchored cursor against the current window list, which is in
+/// front-to-back order (how every backend lists `windows`).
+#[must_use]
+pub fn track_cursor(
+    windows: &[pragma_constants::ComputerWindow],
+    anchor: &CursorAnchor,
+) -> Option<TrackedCursor> {
+    let index = windows.iter().position(|w| w.id == anchor.window_id)?;
+    let frame = windows[index].frame.clone();
+    let point = ComputerPoint {
+        x: frame.x + anchor.dx,
+        y: frame.y + anchor.dy,
+    };
+    let covered = windows[..index]
+        .iter()
+        .any(|w| rect_contains(&w.frame, &point));
+    Some(TrackedCursor {
+        point,
+        window: Some(frame),
+        covered,
+    })
 }
 
 /// Parses `x,y` into a point.
@@ -804,6 +951,10 @@ mod tests {
             ComputerOp::Pause,
             ComputerOp::Unpause,
             ComputerOp::Stop,
+            ComputerOp::Run,
+            ComputerOp::Resume,
+            ComputerOp::Cancel,
+            ComputerOp::Task,
         ] {
             assert_eq!(command_spec(op).op, op);
         }
@@ -839,6 +990,52 @@ mod tests {
         );
         assert_eq!(leases.holder("com.apple.safari"), None);
         assert_eq!(leases.holder("com.apple.textedit"), Some("cs_b"));
+    }
+
+    #[test]
+    fn menu_shortcut_masks_match_appkit() {
+        let mask = |text| ax_menu_modifiers(&parse_chord(text, ChordPlatform::Mac).unwrap());
+        assert_eq!(mask("cmd+a"), Some(0));
+        assert_eq!(mask("cmd+shift+s"), Some(1));
+        assert_eq!(mask("cmd+alt+i"), Some(2));
+        assert_eq!(mask("ctrl+tab"), Some(4 | 8));
+        assert_eq!(mask("shift+a"), None);
+        assert_eq!(mask("enter"), None);
+    }
+
+    #[test]
+    fn takeover_needs_recent_input_aimed_at_the_target() {
+        let typing = UserActivity {
+            keyboard_seconds: Some(0.1),
+            pointer_seconds: Some(60.0),
+            ..UserActivity::default()
+        };
+        // Typing in another app leaves the agent alone…
+        assert!(!is_user_takeover(&typing));
+        // …typing into the target does not.
+        assert!(is_user_takeover(&UserActivity {
+            target_frontmost: true,
+            ..typing.clone()
+        }));
+        let clicking = UserActivity {
+            keyboard_seconds: Some(60.0),
+            pointer_seconds: Some(0.2),
+            target_frontmost: true,
+            pointer_over_target: false,
+        };
+        // A click elsewhere, even with the target frontmost, is not a takeover.
+        assert!(!is_user_takeover(&clicking));
+        assert!(is_user_takeover(&UserActivity {
+            pointer_over_target: true,
+            ..clicking.clone()
+        }));
+        // Old input and unknown input never count.
+        assert!(!is_user_takeover(&UserActivity {
+            keyboard_seconds: Some(TAKEOVER_WINDOW_SECONDS),
+            pointer_seconds: None,
+            target_frontmost: true,
+            pointer_over_target: true,
+        }));
     }
 
     #[test]
@@ -1052,5 +1249,82 @@ mod tests {
         assert_eq!(owner_key(&caller), "tab:tab-1");
         assert_eq!(grant_key(&caller), "agent:claude-code");
         assert_eq!(caller_label(&caller), "claude-code");
+    }
+
+    fn listed(id: &str, x: f64, y: f64, w: f64, h: f64) -> pragma_constants::ComputerWindow {
+        pragma_constants::ComputerWindow {
+            id: id.to_string(),
+            app_id: "app:test".to_string(),
+            app_name: "Test".to_string(),
+            pid: 1,
+            title: String::new(),
+            frame: ComputerRect {
+                x,
+                y,
+                w,
+                h,
+                display_id: None,
+            },
+            focused: false,
+            minimized: false,
+            on_screen: true,
+        }
+    }
+
+    #[test]
+    fn tracked_cursor_follows_its_window() {
+        let start = listed("w1", 100.0, 100.0, 400.0, 300.0);
+        let anchor = CursorAnchor::new("w1", &start.frame, &ComputerPoint { x: 150.0, y: 120.0 });
+        let moved = track_cursor(&[listed("w1", 300.0, 200.0, 400.0, 300.0)], &anchor).unwrap();
+        assert_eq!(moved.point, ComputerPoint { x: 350.0, y: 220.0 });
+        assert!(!moved.covered);
+        assert_eq!(moved.window.unwrap().x, 300.0);
+    }
+
+    #[test]
+    fn tracked_cursor_is_covered_only_by_windows_in_front() {
+        let target = listed("w1", 0.0, 0.0, 400.0, 300.0);
+        let anchor = CursorAnchor::new("w1", &target.frame, &ComputerPoint { x: 50.0, y: 50.0 });
+        let other = listed("w2", 0.0, 0.0, 200.0, 200.0);
+        let front = track_cursor(&[other.clone(), target.clone()], &anchor).unwrap();
+        assert!(front.covered);
+        let behind = track_cursor(&[target, other], &anchor).unwrap();
+        assert!(!behind.covered);
+    }
+
+    fn r(x: f64, y: f64, w: f64, h: f64) -> ComputerRect {
+        ComputerRect {
+            x,
+            y,
+            w,
+            h,
+            display_id: None,
+        }
+    }
+
+    #[test]
+    fn visible_center_stays_inside_the_window() {
+        // TextEdit's text area: far taller than its window.
+        let text = r(479.0, 299.0, 656.0, 1134.0);
+        let window = r(479.0, 163.0, 656.0, 422.0);
+        assert_eq!(
+            visible_center(&text, std::slice::from_ref(&window)),
+            Some(ComputerPoint { x: 807.0, y: 442.0 })
+        );
+        assert_eq!(
+            visible_center(&text, &[]),
+            Some(ComputerPoint { x: 807.0, y: 866.0 })
+        );
+        assert_eq!(visible_center(&text, &[r(0.0, 0.0, 10.0, 10.0)]), None);
+    }
+
+    #[test]
+    fn tracked_cursor_is_gone_with_its_window() {
+        let anchor = CursorAnchor {
+            window_id: "w1".to_string(),
+            dx: 0.0,
+            dy: 0.0,
+        };
+        assert!(track_cursor(&[listed("w2", 0.0, 0.0, 10.0, 10.0)], &anchor).is_none());
     }
 }

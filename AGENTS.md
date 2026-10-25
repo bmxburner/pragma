@@ -318,15 +318,25 @@ than no guide.
   `crates/pragma-protocol`; CLI/status reporting → `crates/pragma-cli`.
 - Computer use (reading and controlling other desktop apps) → native calls in
   `crates/pragma-computer` (run in the supervised `pragma-computer` helper),
-  pure rules in `crates/pragma-core/src/computer.rs`, sessions/leases/policy/
+  pure rules in `crates/pragma-core/src/computer.rs` and `computer_task.rs`, sessions/leases/policy/
   approvals and the `computer` RPC + `computerActivity` stream in
   `crates/pragma-server/src/computer/`. The CLI (`pragma-cli computer`) and the
   desktop (in-app picture-in-picture panel, per-display cursor overlay windows, approvals, Settings → Computer Use) are callers
   of the same RPC. Off unless the global `computerUse.enabled` is true; acting
   needs the desktop open; only the desktop (`caller.kind = user`) may approve,
   pause, stop, or read frames.
+  Durable tasks live in `computer/tasks.rs` (metadata, volatile inputs) and
+  `computer/tasks/runner.rs` (observe/decide/validate/act/verify); the long-lived
+  `pragma-ai computer-decide` sidecar keeps System 1 calls in `packages/ai-helpers`.
+  The gateway's computer RPC and activity subscription require the owner-only local
+  token, never the pairing token. SDK calls from terminals retain their tab attribution;
+  gateway callers cannot claim desktop-user authority. Desktop previews use cancellable
+  Tauri channels and never put image bytes on `computerActivity`.
 - Anything that differs between operating systems → `crates/pragma-platform`. Never a
   bare `#[cfg(unix)]` at the call site (see _Platform targets_).
+- macOS background webviews rely on `vendor/wry` honoring `.focused(false)` during
+  construction. Keep its focus guards until upstream fixes unconditional app
+  activation; see `vendor/wry/PRAGMA-PATCH.md`.
 
 ## Common commands
 
@@ -752,8 +762,8 @@ on every target:
 
 **`unsafe` is denied workspace-wide, with exactly two documented exceptions:** the `dock`
 seam, which has no safe binding (an Objective-C method added to tao's app delegate on
-macOS, COM on Windows), and computer use's FFI module `crates/pragma-computer/src/macos/ffi.rs`
-(the Accessibility API takes out-pointers everywhere). The workspace lint is `deny` rather
+macOS, COM on Windows), and computer use's FFI modules `crates/pragma-computer/src/{macos,windows}/ffi.rs`
+(Accessibility/ScreenCaptureKit callbacks and UI Automation/SendInput). The workspace lint is `deny` rather
 than `forbid` only so those modules can carry `#[allow(unsafe_code)]`. Do not add another
 without the owner's sign-off and a `// SAFETY:` comment on every block.
 

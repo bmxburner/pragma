@@ -24,7 +24,8 @@ where
     W: Write + Send + 'static,
 {
     let output = Arc::new(Mutex::new(output));
-    let (tx, rx) = mpsc::channel::<HelperRequest>();
+    let (tx, rx) = mpsc::channel::<(HelperRequest, Context)>();
+    let reader_context = ctx.clone();
     let reader_output = Arc::clone(&output);
     let stop = ctx.stop.clone();
     let reader = std::thread::spawn(move || {
@@ -38,6 +39,10 @@ where
                     match request.op {
                         HelperOp::Stop => stop.trip(),
                         HelperOp::ClearStop => stop.clear(),
+                        HelperOp::SetSessionPaused {
+                            ref session,
+                            paused,
+                        } => stop.set_session_paused(session, paused),
                         _ => {}
                     }
                     write(
@@ -45,8 +50,24 @@ where
                         &HelperResponse::ok(request.id, serde_json::Value::Null),
                     );
                 }
-                Ok(request) => {
-                    if tx.send(request).is_err() {
+                Ok(mut request) => {
+                    // Capture cancellation when queued, so a fast pause/resume
+                    // cannot revive an action that was waiting for the backend.
+                    let context = if let HelperOp::InSession {
+                        session,
+                        pid,
+                        action,
+                    } = request.op
+                    {
+                        request.op = *action;
+                        Context {
+                            stop: stop.for_session(&session, pid),
+                            ..reader_context.clone()
+                        }
+                    } else {
+                        reader_context.clone()
+                    };
+                    if tx.send((request, context)).is_err() {
                         break;
                     }
                 }
@@ -69,8 +90,8 @@ where
             }
         }
     });
-    for request in rx {
-        let response = match run(backend, ctx, request.op) {
+    for (request, context) in rx {
+        let response = match run(backend, &context, request.op) {
             Ok(value) => HelperResponse::ok(request.id, value),
             Err(error) => HelperResponse::err(request.id, error),
         };
@@ -96,15 +117,29 @@ pub fn run(
     op: HelperOp,
 ) -> ComputerResult<serde_json::Value> {
     match op {
-        HelperOp::Ping | HelperOp::Stop | HelperOp::ClearStop => Ok(serde_json::Value::Null),
-        HelperOp::Permissions(request) => {
-            to_value(backend.permissions(request.request == Some(true)))
+        HelperOp::InSession {
+            session,
+            pid,
+            action,
+        } => {
+            let scoped = Context {
+                stop: ctx.stop.for_session(&session, pid),
+                ..ctx.clone()
+            };
+            scoped.stop.check()?;
+            run(backend, &scoped, *action)
         }
+        HelperOp::SetSessionPaused { session, paused } => {
+            ctx.stop.set_session_paused(&session, paused);
+            Ok(serde_json::Value::Null)
+        }
+        HelperOp::Ping | HelperOp::Stop | HelperOp::ClearStop => Ok(serde_json::Value::Null),
+        HelperOp::Permissions(request) => to_value(backend.permissions(&request)),
         HelperOp::Displays => to_value(backend.displays()),
         HelperOp::Apps(request) => to_value(backend.apps(&request)),
         HelperOp::Windows(request) => to_value(backend.windows(&request)),
-        HelperOp::Open(request) => to_value(backend.open(ctx, &request)),
-        HelperOp::Focus(request) => to_value(backend.focus(ctx, &request)),
+        HelperOp::Open(request) => acting(ctx, || backend.open(ctx, &request)),
+        HelperOp::Focus(request) => acting(ctx, || backend.focus(ctx, &request)),
         HelperOp::Inspect(request) => to_value(backend.inspect(&request)),
         HelperOp::Screenshot(request) => to_value(backend.screenshot(ctx, &request)),
         HelperOp::Resolve(request) => to_value(backend.resolve(&request)),
@@ -114,7 +149,7 @@ pub fn run(
         HelperOp::Scroll(request) => acting(ctx, || backend.scroll(ctx, &request)),
         HelperOp::Move(request) => acting(ctx, || backend.move_pointer(ctx, &request)),
         HelperOp::Drag(request) => acting(ctx, || backend.drag(ctx, &request)),
-        HelperOp::Idle => Ok(serde_json::json!({ "seconds": backend.seconds_since_user_input() })),
+        HelperOp::UserActivity { pid } => to_value(Ok(backend.user_activity(pid))),
     }
 }
 

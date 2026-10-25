@@ -208,6 +208,19 @@ impl Policy {
         self.answered.notify_all();
     }
 
+    /// Withdraws a cancelled task owner's outstanding prompts.
+    pub fn deny_caller(&self, caller: &ComputerCaller) {
+        if let Ok(mut pending) = self.pending.lock() {
+            for entry in pending.values_mut().filter(|entry| {
+                pragma_core::computer::owner_key(&entry.approval.caller)
+                    == pragma_core::computer::owner_key(caller)
+            }) {
+                entry.decision.get_or_insert(ComputerApprovalDecision::Deny);
+            }
+        }
+        self.answered.notify_all();
+    }
+
     fn remember_always(&self, caller: &ComputerCaller) {
         let Ok(mut always) = self.always.lock() else {
             return;

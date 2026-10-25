@@ -3,11 +3,19 @@
 //! windows, displays, and capture.
 //!
 //! Element actions (`AXPress`, setting `AXValue`) are preferred because they
-//! work on background windows and never move the physical cursor. Pointer and
-//! keyboard paths activate the target, check it really is frontmost, and only
-//! then post events; a mismatch is `targetChanged`, never a click elsewhere.
+//! work on background windows and never move the physical cursor. Clicks,
+//! scrolls, and keys that need real events are delivered to the target
+//! process in the background (`background`): the app is not activated, its
+//! window is not raised, and the user's pointer does not move. Nothing an
+//! agent does brings its app to the front: drags, and clicks the background
+//! path cannot address (no window of the app under the point, or the Window
+//! Server refusing the focus record), post HID events only when the app is
+//! already frontmost and are `targetChanged` otherwise. Only `focus` with
+//! `activate` (the desktop user's own navigation) and `open` with `activate`
+//! bring an app forward, and the server sets those for the user alone.
 
 mod apps;
+mod background;
 mod ffi;
 mod input;
 mod responsible;
@@ -21,23 +29,25 @@ use pragma_constants::{
     ComputerApp, ComputerAppsRequest, ComputerClickRequest, ComputerDisplay, ComputerDragRequest,
     ComputerElement, ComputerErrorCode, ComputerFocusRequest, ComputerImageFormat,
     ComputerInspectRequest, ComputerKeyRequest, ComputerMethod, ComputerMouseButton,
-    ComputerMoveRequest, ComputerOpenRequest, ComputerPermissionState, ComputerPermissions,
-    ComputerPoint, ComputerRect, ComputerScreenshot, ComputerScreenshotRequest,
-    ComputerScrollDirection, ComputerScrollRequest, ComputerSnapshot, ComputerTypeRequest,
-    ComputerWindow, ComputerWindowsRequest, CONSTANTS,
+    ComputerMoveRequest, ComputerOpenRequest, ComputerPermissionKind, ComputerPermissionState,
+    ComputerPermissions, ComputerPermissionsRequest, ComputerPoint, ComputerRect,
+    ComputerScreenshot, ComputerScreenshotRequest, ComputerScrollDirection, ComputerScrollRequest,
+    ComputerSnapshot, ComputerTypeRequest, ComputerWindow, ComputerWindowsRequest, CONSTANTS,
 };
 use pragma_core::computer::{
-    matches_query, parse_chord, parse_point, rect_center, revalidate, snapshot_id, ChordPlatform,
-    Modifier, Revalidation,
+    ax_menu_modifiers, matches_query, parse_chord, parse_point, rect_center, revalidate,
+    snapshot_id, visible_center, Chord, ChordPlatform, Key, Modifier, Revalidation,
 };
 
 use self::apps::Running;
 use self::ffi::Element;
+pub(crate) use self::ffi::{capture_image, supports_screen_capture_kit};
 pub use self::responsible::run_as_own_identity;
 use crate::capture::{self, CaptureOutput, CaptureTarget};
 use crate::snapshot::{normalize_role, SnapshotRing, WalkLimits};
 use crate::{
-    failure, ComputerBackend, ComputerResult, Context, Focused, Performed, ResolveRequest, Resolved,
+    failure, ComputerBackend, ComputerResult, Context, Focused, Performed, ResolveRequest,
+    Resolved, UserActivity,
 };
 
 /// Seconds any one app may take to answer an accessibility message.
@@ -160,15 +170,23 @@ fn activate(app: &Running) -> ComputerResult<()> {
     ))
 }
 
+/// The foreground path's gate: real HID input goes to whatever is in front,
+/// and Pragma never brings an agent's app forward to make that the target.
 fn require_frontmost(app: &Running) -> ComputerResult<()> {
     if frontmost_pid() == Some(app.handle.processIdentifier()) {
-        Ok(())
-    } else {
-        Err(failure(
-            ComputerErrorCode::TargetChanged,
-            format!("{} is no longer frontmost", app.app.name),
-        ))
+        return Ok(());
     }
+    let mut refused = failure(
+        ComputerErrorCode::TargetChanged,
+        format!(
+            "{} is in the background and this needs it in front; agents never bring an app forward",
+            app.app.name
+        ),
+    );
+    refused.hint = Some(
+        "Use an element id or a point inside one of its windows, which work in the background, or ask the user to bring the app forward.".to_string(),
+    );
+    Err(refused)
 }
 
 // ------------------------------------------------------------------ windows
@@ -211,6 +229,127 @@ fn listed_windows(running: &[Running]) -> Vec<ComputerWindow> {
             })
         })
         .collect()
+}
+
+fn contains(info: &ffi::WindowInfo, point: &CGPoint) -> bool {
+    point.x >= info.x && point.x < info.x + info.w && point.y >= info.y && point.y < info.y + info.h
+}
+
+/// The window of `pid` an action at `point` lands in, even when another
+/// window covers it there: `own` (the window an element was read from) when
+/// given, else the app's frontmost regular window containing the point.
+///
+/// An element's own window matters: when two of the app's windows overlap,
+/// the frontmost one at the point is not necessarily the element's.
+fn window_at(pid: i32, point: &CGPoint, own: Option<u32>) -> Option<ffi::WindowInfo> {
+    ffi::window_list().into_iter().find(|info| {
+        info.pid == pid
+            && info.layer == 0
+            && own.is_none_or(|own| info.id == own)
+            && contains(info, point)
+    })
+}
+
+/// The id of the topmost regular window under `point`, whoever owns it.
+fn top_window_at(point: &CGPoint) -> Option<u32> {
+    ffi::window_list()
+        .into_iter()
+        .find(|info| info.layer == 0 && contains(info, point))
+        .map(|info| info.id)
+}
+
+/// The window of `pid` an action at `point` lands in (see [`window_at`]), and
+/// whether any other window, the app's own included, covers the point there.
+fn pointer_window(
+    pid: u64,
+    point: &ComputerPoint,
+    own: Option<u32>,
+) -> (Option<ComputerWindow>, bool) {
+    let cg = to_cg(point);
+    let Some(info) = window_at(pid_i32(pid), &cg, own) else {
+        return (None, false);
+    };
+    let id = capture::window_id(info.id);
+    let window = listed_windows(&apps::running())
+        .into_iter()
+        .find(|window| window.id == id);
+    let covered = top_window_at(&cg) != Some(info.id);
+    (window, covered)
+}
+
+/// The background-delivery target for a pointer gesture at `point` in `pid`'s
+/// window (see [`window_at`]), or `None` when it cannot be delivered there.
+fn background_target(
+    pid: u64,
+    point: &ComputerPoint,
+    own: Option<u32>,
+) -> Option<background::Target> {
+    if !background::available() {
+        return None;
+    }
+    let pid = pid_i32(pid);
+    let point = to_cg(point);
+    let window = window_at(pid, &point, own);
+    background::trace(|| {
+        format!(
+            "window_at pid={pid} point={point:?} -> {:?}",
+            window.as_ref().map(|w| (w.id, w.x, w.y, w.w, w.h))
+        )
+    });
+    let window = window?;
+    Some(background::Target {
+        pid,
+        window: window.id,
+        point,
+        origin: CGPoint {
+            x: window.x,
+            y: window.y,
+        },
+        height: window.h,
+    })
+}
+
+/// Clicks in the background when it can. `Ok(false)` means it could not and
+/// nothing was sent; the caller falls back to activating the app.
+fn background_click(
+    ctx: &Context,
+    pid: u64,
+    point: &ComputerPoint,
+    own: Option<u32>,
+    gesture: (ComputerMouseButton, u32, &[Modifier]),
+) -> ComputerResult<bool> {
+    let (button, count, held) = gesture;
+    let Some(target) = background_target(pid, point, own) else {
+        return Ok(false);
+    };
+    if background::prepare(&target).is_err() {
+        return Ok(false);
+    }
+    background::click(&ctx.stop, &target, button, count, held)?;
+    Ok(true)
+}
+
+/// A physical input reading, unless it could be one of our own background
+/// posts (`own`): those may be counted in the HID system state too.
+fn user_seconds(measured: f64, own: Option<f64>) -> Option<f64> {
+    match own {
+        Some(own) if measured >= own - 0.05 => None,
+        _ => Some(measured),
+    }
+}
+
+/// The pid owning the topmost regular window under `point`, if any.
+fn window_owner_at(point: &CGPoint) -> Option<i32> {
+    ffi::window_list()
+        .into_iter()
+        .find(|info| {
+            info.layer == 0
+                && point.x >= info.x
+                && point.x < info.x + info.w
+                && point.y >= info.y
+                && point.y < info.y + info.h
+        })
+        .map(|info| info.pid)
 }
 
 fn display_of(displays: &[ComputerDisplay], x: f64, y: f64) -> Option<String> {
@@ -287,8 +426,33 @@ fn same_window(element: &Element, window: &ComputerWindow) -> bool {
 /// A stored element resolved against the live tree.
 struct Live {
     pid: u64,
+    /// The native id of the window the element was read from.
+    window: Option<u32>,
     handle: Element,
     element: ComputerElement,
+}
+
+/// The frames that clip `element` on screen, innermost first: each scroll
+/// view around it, then its window.
+fn clips_of(element: &Element) -> Vec<ComputerRect> {
+    /// Bounds the walk up a pathological tree.
+    const MAX_ANCESTORS: usize = 64;
+    let mut clips = Vec::new();
+    let mut current = ffi::element(element, "AXParent");
+    for _ in 0..MAX_ANCESTORS {
+        let Some(node) = current else {
+            break;
+        };
+        let role = ffi::string(&node, "AXRole");
+        if matches!(role.as_deref(), Some("AXScrollArea" | "AXWindow")) {
+            clips.extend(live_frame(&node));
+        }
+        if role.as_deref() == Some("AXWindow") {
+            break;
+        }
+        current = ffi::element(&node, "AXParent");
+    }
+    clips
 }
 
 fn live_frame(handle: &Element) -> Option<ComputerRect> {
@@ -338,6 +502,7 @@ impl MacBackend {
             element.frame = live_frame(&handle).or(element.frame);
             return Ok(Live {
                 pid,
+                window: window_id.as_deref().and_then(capture::parse_window_id),
                 handle,
                 element,
             });
@@ -355,6 +520,7 @@ impl MacBackend {
         match revalidate(&element, &walked.elements) {
             Revalidation::SamePath(found) | Revalidation::Moved(found) => Ok(Live {
                 pid,
+                window: window_id.as_deref().and_then(capture::parse_window_id),
                 handle: walked.handles[found].clone(),
                 element: walked.elements[found].clone(),
             }),
@@ -381,15 +547,28 @@ impl MacBackend {
         }
     }
 
-    /// The live element's centre, after checking nothing covers it.
-    fn hit_point(live: &Live) -> ComputerResult<ComputerPoint> {
+    /// Where to act on the live element, covered or not: the centre of its
+    /// visible part (see [`visible_center`]).
+    fn center_point(live: &Live) -> ComputerResult<ComputerPoint> {
         let frame = live.element.frame.as_ref().ok_or_else(|| {
             failure(
                 ComputerErrorCode::ElementNotFound,
                 "the element has no on-screen frame",
             )
         })?;
-        let center = rect_center(frame);
+        visible_center(frame, &clips_of(&live.handle)).ok_or_else(|| {
+            let mut hidden = failure(
+                ComputerErrorCode::ElementNotFound,
+                "the element is scrolled out of view",
+            );
+            hidden.hint = Some("Scroll it into view, then run inspect again.".to_string());
+            hidden
+        })
+    }
+
+    /// The live element's centre, after checking nothing covers it.
+    fn hit_point(live: &Live) -> ComputerResult<ComputerPoint> {
+        let center = Self::center_point(live)?;
         #[allow(clippy::cast_possible_truncation)]
         let hit = ffi::element_at(&ffi::system_wide(), center.x as f32, center.y as f32);
         let owner = hit.as_ref().and_then(|hit| ffi::pid(hit));
@@ -435,22 +614,64 @@ impl MacBackend {
     }
 }
 
-fn screen_permission(request: bool) -> ComputerPermissionState {
-    let granted = if request {
-        objc2_core_graphics::CGRequestScreenCaptureAccess()
-    } else {
-        objc2_core_graphics::CGPreflightScreenCaptureAccess()
-    };
-    if granted {
+fn screen_permission(request: bool) -> ComputerResult<ComputerPermissionState> {
+    screen_permission_with(
+        request,
+        |prompt| {
+            if prompt {
+                objc2_core_graphics::CGRequestScreenCaptureAccess()
+            } else {
+                objc2_core_graphics::CGPreflightScreenCaptureAccess()
+            }
+        },
+        || {
+            apps::launch(&apps::LaunchSpec {
+                bundle_id: Some("com.apple.systempreferences"),
+                path: None,
+                name: None,
+                new_instance: false,
+                activate: true,
+                documents: vec![
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+                ],
+            })
+        },
+    )
+}
+
+// Keep native permission decisions testable without resetting the user's grants.
+fn screen_permission_with(
+    request: bool,
+    check: impl FnOnce(bool) -> bool,
+    open_settings: impl FnOnce() -> ComputerResult<()>,
+) -> ComputerResult<ComputerPermissionState> {
+    let granted = check(request);
+    // macOS may silently return false once the initial prompt has been
+    // answered. An explicit request must still take the user somewhere they
+    // can enable the grant; passive checks must never open System Settings.
+    if request && !granted {
+        open_settings()?;
+    }
+    Ok(if granted {
         ComputerPermissionState::Granted
     } else {
         ComputerPermissionState::Denied
-    }
+    })
 }
 
 impl ComputerBackend for MacBackend {
-    fn permissions(&mut self, request: bool) -> ComputerResult<ComputerPermissions> {
-        let accessibility = if ffi::is_trusted(request) {
+    fn permissions(
+        &mut self,
+        request: &ComputerPermissionsRequest,
+    ) -> ComputerResult<ComputerPermissions> {
+        let prompt = request.request == Some(true);
+        let accessibility = if ffi::is_trusted(
+            prompt
+                && request
+                    .permission
+                    .as_ref()
+                    .is_none_or(|kind| *kind == ComputerPermissionKind::Accessibility),
+        ) {
             ComputerPermissionState::Granted
         } else {
             ComputerPermissionState::Denied
@@ -459,7 +680,13 @@ impl ComputerBackend for MacBackend {
             platform: crate::platform_name().to_string(),
             supported: true,
             accessibility,
-            screen_recording: screen_permission(request),
+            screen_recording: screen_permission(
+                prompt
+                    && request
+                        .permission
+                        .as_ref()
+                        .is_none_or(|kind| *kind == ComputerPermissionKind::ScreenRecording),
+            )?,
         })
     }
 
@@ -518,7 +745,7 @@ impl ComputerBackend for MacBackend {
             path: path.as_deref(),
             name,
             new_instance: request.new_instance == Some(true),
-            activate: request.activate != Some(false),
+            activate: request.activate == Some(true),
             documents,
         })?;
         let wait = Duration::from_millis(
@@ -558,14 +785,26 @@ impl ComputerBackend for MacBackend {
 
     fn focus(&mut self, _ctx: &Context, request: &ComputerFocusRequest) -> ComputerResult<Focused> {
         let app = running_app(request.app.as_deref(), request.pid)?;
-        activate(&app)?;
+        let activating = request.activate == Some(true);
+        if activating {
+            activate(&app)?;
+        }
         let pid = app.app.pid.unwrap_or(0);
         let element = ffi::application(pid_i32(pid));
         ffi::set_timeout(&element, AX_TIMEOUT_SECONDS);
         let (window, listed) = ax_window(&element, pid, request.window.as_deref())?;
         if request.window.is_some() {
-            let _ = ffi::perform(&window, "AXRaise");
+            // Main within its own app only; raising is the user's call.
             let _ = ffi::set_bool(&window, "AXMain", true);
+            if activating {
+                let _ = ffi::perform(&window, "AXRaise");
+            }
+        }
+        if !activating {
+            focus_for_keys(
+                pid_i32(pid),
+                request.window.as_deref().and_then(capture::parse_window_id),
+            );
         }
         Ok(Focused {
             app: app.app,
@@ -618,6 +857,7 @@ impl ComputerBackend for MacBackend {
             handles,
         );
         Ok(ComputerSnapshot {
+            url: pragma_core::computer_task::observed_url(&elements),
             id: snapshot_id(seq),
             app: app.app,
             window: listed,
@@ -684,12 +924,16 @@ impl ComputerBackend for MacBackend {
         if let Some(id) = &request.element {
             let live = self.live(id)?;
             let app = Self::app_for_live(&live)?;
-            let point = live.element.frame.as_ref().map(rect_center);
+            let point = Self::center_point(&live).ok();
+            let (window, covered) = point.as_ref().map_or((None, false), |point| {
+                pointer_window(live.pid, point, live.window)
+            });
             return Ok(Resolved {
                 app: app.app,
-                window: None,
+                window,
                 element: Some(live.element),
                 point,
+                covered,
             });
         }
         let app = if request.app.is_none() && request.pid.is_none() {
@@ -703,11 +947,16 @@ impl ComputerBackend for MacBackend {
         } else {
             running_app(request.app.as_deref(), request.pid)?
         };
+        let (window, covered) = match (&request.point, app.app.pid) {
+            (Some(point), Some(pid)) => pointer_window(pid, point, None),
+            _ => (None, false),
+        };
         Ok(Resolved {
             app: app.app,
-            window: None,
+            window,
             element: None,
             point: request.point.clone(),
+            covered,
         })
     }
 
@@ -729,6 +978,7 @@ impl ComputerBackend for MacBackend {
                 && count == 1
                 && held.is_empty()
             {
+                ctx.stop.check()?;
                 match ffi::perform(&live.handle, "AXPress") {
                     Ok(()) => {
                         return Ok(Performed {
@@ -751,8 +1001,18 @@ impl ComputerBackend for MacBackend {
                     "that element has no press action",
                 ));
             }
+            // In the background the event is addressed to the element's
+            // window, so another app covering it does not matter.
+            if let Ok(center) = Self::center_point(&live) {
+                if background_click(ctx, live.pid, &center, live.window, (button, count, &held))? {
+                    return Ok(Performed {
+                        method: ComputerMethod::Pointer,
+                        physical_cursor: false,
+                        element: Some(live.element),
+                    });
+                }
+            }
             let app = Self::app_for_live(&live)?;
-            activate(&app)?;
             let point = Self::hit_point(&live)?;
             pointer_click(ctx, &app, &point, button, count, &held)?;
             return Ok(Performed {
@@ -768,8 +1028,15 @@ impl ComputerBackend for MacBackend {
             point: Some(point.clone()),
             ..ResolveRequest::default()
         })?;
-        let running = running_app(None, app.app.pid)?;
-        activate(&running)?;
+        let pid = app.app.pid.unwrap_or(0);
+        if background_click(ctx, pid, &point, None, (button, count, &held))? {
+            return Ok(Performed {
+                method: ComputerMethod::Pointer,
+                physical_cursor: false,
+                element: None,
+            });
+        }
+        let running = running_app(None, Some(pid))?;
         pointer_click(ctx, &running, &point, button, count, &held)?;
         Ok(Performed {
             method: ComputerMethod::Pointer,
@@ -785,7 +1052,7 @@ impl ComputerBackend for MacBackend {
     ) -> ComputerResult<Performed> {
         let method = request.method.unwrap_or(ComputerMethod::Auto);
         let replace = request.replace == Some(true);
-        let (app, element) = if let Some(id) = &request.element {
+        let (app, own, element) = if let Some(id) = &request.element {
             let live = self.live(id)?;
             if live.element.secure && request.secret != Some(true) {
                 return Err(failure(
@@ -793,6 +1060,7 @@ impl ComputerBackend for MacBackend {
                     "typing into a secure field needs --secret",
                 ));
             }
+            ctx.stop.check()?;
             // Setting the value directly needs no focus and no keystrokes.
             if method != ComputerMethod::Keys
                 && replace
@@ -801,10 +1069,8 @@ impl ComputerBackend for MacBackend {
                 && ffi::set_string(&live.handle, "AXValue", &request.text).is_ok()
             {
                 {
-                    let app = Self::app_for_live(&live)?;
                     if request.submit == Some(true) {
-                        activate(&app)?;
-                        input::press(&parse_chord("enter", ChordPlatform::Mac).map_err(invalid)?)?;
+                        send_chord(pid_i32(live.pid), &chord("enter")?)?;
                     }
                     return Ok(Performed {
                         method: ComputerMethod::Ax,
@@ -813,14 +1079,16 @@ impl ComputerBackend for MacBackend {
                     });
                 }
             }
-            let app = Self::app_for_live(&live)?;
-            activate(&app)?;
+            // Keys go to the app's focused element, which Accessibility can
+            // move without activating the app.
             let _ = ffi::set_bool(&live.handle, "AXFocused", true);
-            (app, Some(live.element))
+            (Self::app_for_live(&live)?, live.window, Some(live.element))
         } else {
-            let app = running_app(request.app.as_deref(), request.pid)?;
-            activate(&app)?;
-            (app, None)
+            (
+                running_app(request.app.as_deref(), request.pid)?,
+                None,
+                None,
+            )
         };
         if method == ComputerMethod::Ax {
             return Err(failure(
@@ -828,14 +1096,15 @@ impl ComputerBackend for MacBackend {
                 "that field cannot be set directly; use --method keys",
             ));
         }
-        require_frontmost(&app)?;
+        let pid = app.handle.processIdentifier();
+        focus_for_keys(pid, own);
         if replace {
-            input::press(&parse_chord("cmd+a", ChordPlatform::Mac).map_err(invalid)?)?;
+            send_chord(pid, &chord("cmd+a")?)?;
         }
-        input::type_text(&ctx.stop, &request.text)?;
+        background::type_text(&ctx.stop, pid, &request.text)?;
         if request.submit == Some(true) {
             ctx.stop.check()?;
-            input::press(&parse_chord("enter", ChordPlatform::Mac).map_err(invalid)?)?;
+            send_chord(pid, &chord("enter")?)?;
         }
         Ok(Performed {
             method: ComputerMethod::Keys,
@@ -856,14 +1125,17 @@ impl ComputerBackend for MacBackend {
                 "give at least one chord",
             ));
         }
-        let app = running_app(request.app.as_deref(), request.pid)?;
-        activate(&app)?;
+        // Posted to the app itself, so it is never activated and no other app
+        // can receive the keys.
+        let pid = running_app(request.app.as_deref(), request.pid)?
+            .handle
+            .processIdentifier();
+        focus_for_keys(pid, None);
         let repeat = request.repeat.map_or(1, std::num::NonZero::get);
         for _ in 0..repeat {
             for chord in &chords {
                 ctx.stop.check()?;
-                require_frontmost(&app)?;
-                input::press(chord)?;
+                send_chord(pid, chord)?;
             }
         }
         Ok(Performed {
@@ -890,13 +1162,22 @@ impl ComputerBackend for MacBackend {
                 })?;
                 (rect_center(&frame), None)
             }
-            (element, x, y) => self.point_for(element.as_deref(), x, y)?,
+            // Background scrolling is addressed to the element's own window,
+            // so another app covering it does not matter; the foreground
+            // fallback below checks coverage before it moves the pointer.
+            (Some(id), _, _) => {
+                let live = self.live(id)?;
+                (Self::center_point(&live)?, Some(live))
+            }
+            (None, x, y) => self.point_for(None, x, y)?,
         };
-        let app = match &live {
-            Some(live) => Self::app_for_live(live)?,
-            None => running_app(request.app.as_deref(), request.pid)?,
+        let owner = match (&live, &request.app, request.pid) {
+            (Some(live), _, _) => Some(live.pid),
+            (None, None, None) => {
+                window_owner_at(&to_cg(&point)).and_then(|pid| u64::try_from(pid).ok())
+            }
+            (None, app, pid) => running_app(app.as_deref(), pid)?.app.pid,
         };
-        activate(&app)?;
         let amount = i32::try_from(request.amount.map_or(3, std::num::NonZero::get)).unwrap_or(3);
         let (vertical, horizontal) = match request.direction {
             ComputerScrollDirection::Up => (amount, 0),
@@ -904,6 +1185,21 @@ impl ComputerBackend for MacBackend {
             ComputerScrollDirection::Left => (0, amount),
             ComputerScrollDirection::Right => (0, -amount),
         };
+        let own = live.as_ref().and_then(|live| live.window);
+        if let Some(target) = owner.and_then(|pid| background_target(pid, &point, own)) {
+            background::scroll(&ctx.stop, &target, vertical, horizontal)?;
+            return Ok(Performed {
+                method: ComputerMethod::Pointer,
+                physical_cursor: false,
+                element: live.map(|live| live.element),
+            });
+        }
+        // Wheel events go to the window under the pointer whether or not its
+        // app is active, so even this path brings nothing to the front, but
+        // they would land in whatever covers the element.
+        if let Some(live) = &live {
+            Self::hit_point(live)?;
+        }
         input::move_to(to_cg(&point))?;
         input::scroll(&ctx.stop, vertical, horizontal)?;
         Ok(Performed {
@@ -940,7 +1236,7 @@ impl ComputerBackend for MacBackend {
             ..ResolveRequest::default()
         })?;
         let app = running_app(None, owner.app.pid)?;
-        activate(&app)?;
+        require_frontmost(&app)?;
         let held = modifiers(&request.modifiers)?;
         let duration = Duration::from_millis(request.duration_ms.unwrap_or(300));
         input::drag(&ctx.stop, to_cg(&from), to_cg(&to), duration, &held)?;
@@ -951,8 +1247,8 @@ impl ComputerBackend for MacBackend {
         })
     }
 
-    fn seconds_since_user_input(&mut self) -> Option<f64> {
-        Some(input::seconds_since_user_input())
+    fn user_activity(&mut self, pid: Option<u64>) -> Option<UserActivity> {
+        Some(user_activity(pid))
     }
 }
 
@@ -974,6 +1270,150 @@ fn pointer_click(
     Ok(())
 }
 
+/// Gives `pid`'s front window keyboard focus without raising it, the same
+/// focus record a background click sends first.
+///
+/// Keys posted to an app (and the menu items shortcuts press) go to its key
+/// window. A background app loses that the moment the user works in another
+/// app, so without this a key or shortcut "succeeds" and does nothing.
+/// Best-effort: a frontmost app needs nothing, and when the record is refused
+/// the keys are still sent, as before.
+///
+/// The window is `own` (an element's window) when given, else the one the app
+/// itself calls focused or main. The app's frontmost window in the Window
+/// Server list is only a last resort: it can be a panel or an invisible
+/// helper window, and keys focused there vanish while reporting success.
+fn focus_for_keys(pid: i32, own: Option<u32>) {
+    if frontmost_pid() == Some(pid) || !background::available() {
+        return;
+    }
+    let app = ffi::application(pid);
+    ffi::set_timeout(&app, AX_TIMEOUT_SECONDS);
+    let Ok(ax_pid) = u64::try_from(pid) else {
+        return;
+    };
+    let own = match own {
+        // Keys sent to an app go to its main window, and the focus record
+        // does not change which of the app's windows that is: make the
+        // element's window main first (this does not activate the app).
+        Some(own) => {
+            if let Ok((window, _)) = ax_window(&app, ax_pid, Some(&capture::window_id(own))) {
+                let _ = ffi::set_bool(&window, "AXMain", true);
+            }
+            Some(own)
+        }
+        None => ax_window(&app, ax_pid, None)
+            .ok()
+            .and_then(|(_, listed)| listed)
+            .and_then(|window| capture::parse_window_id(&window.id)),
+    };
+    let Some(window) = ffi::window_list().into_iter().find(|info| {
+        info.pid == pid
+            && info.layer == 0
+            && info.w > 1.0
+            && info.h > 1.0
+            && own.is_none_or(|own| info.id == own)
+    }) else {
+        background::trace(|| format!("keys: no window to focus for pid {pid}"));
+        return;
+    };
+    let target = background::Target {
+        pid,
+        window: window.id,
+        point: CGPoint {
+            x: window.x + window.w / 2.0,
+            y: window.y + window.h / 2.0,
+        },
+        origin: CGPoint {
+            x: window.x,
+            y: window.y,
+        },
+        height: window.h,
+    };
+    if let Err(error) = background::prepare(&target) {
+        background::trace(|| format!("keys: focus record refused: {}", error.message));
+    }
+}
+
+/// Sends one chord to `pid` in the background: a menu shortcut by pressing
+/// its menu item, anything else as keys.
+fn send_chord(pid: i32, chord: &Chord) -> ComputerResult<()> {
+    if press_menu_shortcut(pid, chord) {
+        return Ok(());
+    }
+    background::press(pid, chord)
+}
+
+/// Presses the enabled menu item whose shortcut is `chord` through
+/// Accessibility. `AppKit` only runs menu key equivalents for the active app,
+/// so a shortcut posted to a background app would be dropped; pressing the
+/// item runs the same command without activating anything.
+fn press_menu_shortcut(pid: i32, chord: &Chord) -> bool {
+    /// Bounds the walk of an app's menus (menu bar, menus, one submenu level).
+    const MAX_ITEMS: usize = 4000;
+    const MAX_DEPTH: u8 = 5;
+    let (Some(mask), Key::Char(character)) = (ax_menu_modifiers(chord), chord.key) else {
+        return false;
+    };
+    let app = ffi::application(pid);
+    ffi::set_timeout(&app, AX_TIMEOUT_SECONDS);
+    let Some(bar) = ffi::element(&app, "AXMenuBar") else {
+        background::trace(|| format!("menu: no AXMenuBar for pid {pid}"));
+        return false;
+    };
+    let shift = chord.modifiers.contains(&Modifier::Shift);
+    let matches = |item: &Element| {
+        let Some(shortcut) = ffi::string(item, "AXMenuItemCmdChar") else {
+            return false;
+        };
+        let mut chars = shortcut.chars();
+        let (Some(only), None) = (chars.next(), chars.next()) else {
+            return false;
+        };
+        if !only.eq_ignore_ascii_case(&character) {
+            return false;
+        }
+        let item_mask = ffi::integer(item, "AXMenuItemCmdModifiers").unwrap_or(0);
+        // AppKit spells Shift either as the mask bit or as an uppercase key.
+        item_mask == mask || (shift && only.is_uppercase() && item_mask == mask & !1)
+    };
+    let mut stack: Vec<(Element, u8)> = ffi::elements(&bar, "AXChildren")
+        .into_iter()
+        .map(|item| (item, 0))
+        .collect();
+    let mut seen = 0;
+    while let Some((node, depth)) = stack.pop() {
+        seen += 1;
+        if seen > MAX_ITEMS {
+            break;
+        }
+        if matches(&node) {
+            let enabled = ffi::boolean(&node, "AXEnabled");
+            let pressed = enabled != Some(false) && ffi::perform(&node, "AXPress").is_ok();
+            background::trace(|| {
+                format!(
+                    "menu {:?} enabled={enabled:?} pressed={pressed}",
+                    ffi::string(&node, "AXTitle")
+                )
+            });
+            return pressed;
+        }
+        if depth < MAX_DEPTH {
+            stack.extend(
+                ffi::elements(&node, "AXChildren")
+                    .into_iter()
+                    .map(|child| (child, depth + 1)),
+            );
+        }
+    }
+    background::trace(|| format!("menu: no item for {chord:?} (mask {mask}) after {seen} nodes"));
+    false
+}
+
+fn chord(text: &str) -> ComputerResult<Chord> {
+    parse_chord(text, ChordPlatform::Mac).map_err(invalid)
+}
+
 fn invalid(message: String) -> pragma_constants::ComputerFailure {
     failure(ComputerErrorCode::InvalidPayload, message)
 }
@@ -989,4 +1429,93 @@ fn permission_missing(permission: &str) -> pragma_constants::ComputerFailure {
         serde_json::Value::String(permission.to_string()),
     );
     missing
+}
+
+/// Physical input probe shared with native action cancellation.
+pub(super) fn user_activity(pid: Option<u64>) -> UserActivity {
+    // An unknown target is treated as the one the user is on.
+    let (target_frontmost, pointer_over_target) = match pid.map(pid_i32) {
+        Some(pid) => (
+            frontmost_pid() == Some(pid),
+            input::pointer_location().and_then(|point| window_owner_at(&point)) == Some(pid),
+        ),
+        None => (true, true),
+    };
+    UserActivity {
+        keyboard_seconds: user_seconds(
+            input::seconds_since_key_press(),
+            background::seconds_since_own_key(),
+        ),
+        pointer_seconds: user_seconds(
+            input::seconds_since_pointer_use(),
+            background::seconds_since_own_pointer(),
+        ),
+        target_frontmost,
+        pointer_over_target,
+    }
+}
+
+#[cfg(test)]
+mod screen_permission_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn a_silently_denied_request_opens_settings_after_requesting_the_grant() {
+        let calls = RefCell::new(Vec::new());
+        let state = screen_permission_with(
+            true,
+            |prompt| {
+                assert!(prompt);
+                calls.borrow_mut().push("request");
+                false
+            },
+            || {
+                calls.borrow_mut().push("open settings");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(state, ComputerPermissionState::Denied);
+        assert_eq!(*calls.borrow(), ["request", "open settings"]);
+    }
+
+    #[test]
+    fn passive_checks_and_granted_requests_do_not_open_settings() {
+        for (request, granted) in [(false, false), (false, true), (true, true)] {
+            let state = screen_permission_with(
+                request,
+                |prompt| {
+                    assert_eq!(prompt, request);
+                    granted
+                },
+                || panic!("must not open settings for a passive check or an existing grant"),
+            )
+            .unwrap();
+            assert_eq!(
+                state,
+                if granted {
+                    ComputerPermissionState::Granted
+                } else {
+                    ComputerPermissionState::Denied
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_settings_launch_is_reported_to_the_button() {
+        let error = screen_permission_with(
+            true,
+            |_| false,
+            || {
+                Err(failure(
+                    ComputerErrorCode::AppNotFound,
+                    "System Settings unavailable",
+                ))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.message, "System Settings unavailable");
+    }
 }

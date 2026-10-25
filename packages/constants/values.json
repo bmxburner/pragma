@@ -32,7 +32,8 @@
       "manifestFile": "manifest.json",
       "resourceDir": "web"
     },
-    "keepAwake": true
+    "keepAwake": true,
+    "localTokenFile": "gateway-local-token"
   },
   "platform": {
     "defaultBackend": "native",
@@ -101,7 +102,7 @@
       "questionTitle": "{agent} is waiting for an answer",
       "commandTitle": "{agent} wants to run a command",
       "locationSeparator": " / ",
-      "tabSuffix": " · tab \"{tab}\"",
+      "tabSuffix": " \u00b7 tab \"{tab}\"",
       "unknownLocation": "Open Pragma to continue."
     }
   },
@@ -393,14 +394,14 @@
       "What are we going to ship in {location}?",
       "What will we create in {location}?",
       "What should we make next in {location}?",
-      "Ready when you are — what should we build in {location}?"
+      "Ready when you are \u2014 what should we build in {location}?"
     ],
     "generic": [
       "What should we build?",
       "What are we going to ship?",
       "What will we create?",
       "What should we make next?",
-      "Ready when you are — what should we build?"
+      "Ready when you are \u2014 what should we build?"
     ]
   },
   "storage": {
@@ -728,7 +729,67 @@
         "lease": false,
         "inputLock": "none",
         "desktopOnly": true
+      },
+      {
+        "op": "run",
+        "mutating": true,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": false
+      },
+      {
+        "op": "resume",
+        "mutating": true,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": false
+      },
+      {
+        "op": "cancel",
+        "mutating": false,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": false
+      },
+      {
+        "op": "task",
+        "mutating": false,
+        "lease": false,
+        "inputLock": "none",
+        "desktopOnly": false
       }
-    ]
+    ],
+    "tasksFile": "computer-tasks.json",
+    "taskHistoryLimit": 200,
+    "taskRetentionMs": 604800000,
+    "taskMaxSteps": 25,
+    "taskMaxTimeMs": 300000,
+    "taskMaxModelCalls": 30,
+    "taskMaxInputChars": 16384,
+    "taskMaxActive": 8,
+    "nextConfidence": 0.55,
+    "itemConfidence": 0.5,
+    "itemMargin": 0.15,
+    "achievedConfidence": 0.8,
+    "taskKeys": [
+      "enter",
+      "escape",
+      "tab",
+      "shift+tab",
+      "mod+l",
+      "mod+f",
+      "mod+a",
+      "left",
+      "right",
+      "up",
+      "down",
+      "page_down",
+      "space"
+    ],
+    "pipFrameIntervalMs": 200,
+    "pipFrameWidth": 480,
+    "pipExpandedFrameWidth": 1280,
+    "localGatewayTokenEnv": "PRAGMA_LOCAL_GATEWAY_TOKEN",
+    "taskRecordLimit": 64
   }
 }

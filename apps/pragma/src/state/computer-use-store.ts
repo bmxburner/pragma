@@ -5,6 +5,7 @@ import type {
   ComputerActivitySnapshot,
   ComputerApproval,
   ComputerPoint,
+  ComputerRect,
   ComputerSession,
 } from "@pragma-sh/constants";
 
@@ -26,9 +27,15 @@ import { computerRpc, onComputerActivity, type ComputerActivityMessage } from "@
 export interface ComputerCursor {
   point: ComputerPoint;
   displayId: string | null;
+  /** The target window's frame; the cursor is drawn only inside it. */
+  window: ComputerRect | null;
+  /** Another app's window covers the point, so the cursor is hidden. */
+  covered: boolean;
   description: string | null;
   /** When the cursor started moving there (ms since epoch). */
   at: number;
+  /** True when it last moved with its window rather than to a new action. */
+  tracking: boolean;
   /** Increments on every completed action, to replay the click ripple. */
   pulses: number;
   physical: boolean;
@@ -92,7 +99,12 @@ function applyDelta(state: ComputerUseState, event: ComputerActivityEvent): Comp
       };
     }
     case "actionStarted": {
-      if (!event.sessionId || !event.pointer) return { ...state, snapshot: base };
+      if (
+        !event.sessionId ||
+        !event.pointer ||
+        base.sessions.some((s) => s.id === event.sessionId && s.paused)
+      )
+        return { ...state, snapshot: base };
       const previous = state.cursors[event.sessionId];
       return {
         snapshot: base,
@@ -101,10 +113,37 @@ function applyDelta(state: ComputerUseState, event: ComputerActivityEvent): Comp
           [event.sessionId]: {
             point: event.pointer.to,
             displayId: event.pointer.displayId ?? null,
+            window: event.pointer.window ?? null,
+            covered: event.pointer.covered ?? false,
             description: event.description ?? null,
             at: event.at,
+            tracking: false,
             pulses: previous?.pulses ?? 0,
             physical: previous?.physical ?? false,
+          },
+        },
+      };
+    }
+    case "cursorMoved": {
+      // The target window moved, closed, or was covered between actions.
+      const previous = event.sessionId ? state.cursors[event.sessionId] : undefined;
+      if (
+        !event.sessionId ||
+        !event.pointer ||
+        !previous ||
+        base.sessions.some((s) => s.id === event.sessionId && s.paused)
+      )
+        return { ...state, snapshot: base };
+      return {
+        snapshot: base,
+        cursors: {
+          ...state.cursors,
+          [event.sessionId]: {
+            ...previous,
+            point: event.pointer.to,
+            window: event.pointer.window ?? null,
+            covered: event.pointer.covered ?? false,
+            tracking: true,
           },
         },
       };
@@ -125,6 +164,16 @@ function applyDelta(state: ComputerUseState, event: ComputerActivityEvent): Comp
     }
     case "helperState":
       return { ...state, snapshot: event.helper ? { ...base, helper: event.helper } : base };
+    case "taskChanged":
+      return {
+        ...state,
+        snapshot: {
+          ...base,
+          tasks: event.task
+            ? [...(base.tasks ?? []).filter((t) => t.id !== event.task!.id), event.task]
+            : base.tasks,
+        },
+      };
     case "stopped":
       return { snapshot: { ...base, stopped: true, sessions: [], approvals: [] }, cursors: {} };
     default:
@@ -210,9 +259,9 @@ export function answerApproval(
   return computerRpc({ op: "approve", approval: approval.id, decision });
 }
 
-/** Pauses, resumes, or stops one session (or all of them with no id). */
+/** Controls a session; focusing its app requires an explicit session id. */
 export async function controlSession(
-  op: "pause" | "unpause" | "stop",
+  op: "pause" | "unpause" | "stop" | "focusSession",
   sessionId?: string,
 ): Promise<void> {
   await computerRpc(sessionId ? { op, session: sessionId } : { op });

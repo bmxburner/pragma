@@ -1,6 +1,22 @@
-import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ComputerScreenshot, ComputerSession } from "@pragma-sh/constants";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { computerRpc, streamComputerFrames } from "@/lib/tauri";
 
-import { clampPosition, cursorInFrame } from "@/components/computer-use/ComputerPip";
+vi.mock("@/lib/tauri", () => ({
+  computerRpc: vi.fn().mockResolvedValue(undefined),
+  streamComputerFrames: vi.fn().mockResolvedValue(() => {}),
+}));
+vi.mock("@/state/computer-use-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/state/computer-use-store")>()),
+  useComputerUse: () => ({ snapshot: null, cursors: {} }),
+}));
+
+import { ComputerPip, clampPosition, cursorInFrame } from "@/components/computer-use/ComputerPip";
+
+afterEach(() => vi.useRealTimers());
 
 describe("clampPosition", () => {
   const size = { width: 320, height: 236 };
@@ -30,5 +46,207 @@ describe("cursorInFrame", () => {
   it("returns null for a cursor outside the frame", () => {
     expect(cursorInFrame({ point: { x: 10, y: 10 } }, frame)).toBeNull();
     expect(cursorInFrame({ point: { x: 200, y: 100 } }, { ...frame, width: 0 })).toBeNull();
+  });
+});
+
+const session: ComputerSession = {
+  id: "cs_1",
+  owner: { kind: "agentTab", tabId: "t1", label: "Agent" },
+  leases: [{ appKey: "com.apple.safari", appName: "Safari", acquiredAt: 1 }],
+  startedAt: 1,
+  lastActionAt: 1,
+  actionCount: 0,
+  paused: false,
+};
+
+describe("Focus app", () => {
+  it("focuses the selected session through the host control", () => {
+    render(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(ComputerPip, {
+          sessions: [
+            session,
+            {
+              ...session,
+              id: "cs_2",
+              owner: { kind: "agentTab", tabId: "t2", label: "Other agent" },
+            },
+          ],
+        }),
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Other agent" }));
+    fireEvent.click(screen.getByRole("button", { name: "Focus app" }));
+    expect(computerRpc).toHaveBeenCalledWith({ op: "focusSession", session: "cs_2" });
+  });
+
+  it("disables focusing until the session controls an app", () => {
+    render(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(ComputerPip, { sessions: [{ ...session, leases: [] }] }),
+      ),
+    );
+    expect(screen.getByRole("button", { name: "Focus app" })).toBeDisabled();
+  });
+});
+
+/** Makes the next preview stream report one capture failure. */
+const failWith = (message: string) =>
+  vi
+    .mocked(streamComputerFrames)
+    .mockImplementationOnce(async (_session, _width, _onFrame, onFailure) => {
+      onFailure?.(message);
+      return () => {};
+    });
+
+describe("preview placeholder", () => {
+  it("offers the Screen Recording prompt when captures fail without the grant", async () => {
+    failWith("the computer-use helper does not have the screenRecording permission");
+    vi.mocked(computerRpc).mockResolvedValueOnce({
+      platform: "macos",
+      accessibility: "granted",
+      screenRecording: "denied",
+      supported: true,
+    });
+    render(
+      createElement(TooltipProvider, null, createElement(ComputerPip, { sessions: [session] })),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Allow Screen Recording" }));
+    expect(computerRpc).toHaveBeenLastCalledWith({
+      op: "permissions",
+      request: true,
+      permission: "screenRecording",
+    });
+  });
+
+  it("keeps waiting, with the reason, when the grant is not the problem", async () => {
+    failWith("that session is not controlling an app");
+    vi.mocked(computerRpc).mockResolvedValueOnce({
+      platform: "macos",
+      accessibility: "granted",
+      screenRecording: "granted",
+      supported: true,
+    });
+    render(
+      createElement(TooltipProvider, null, createElement(ComputerPip, { sessions: [session] })),
+    );
+    expect(await screen.findByText("that session is not controlling an app")).toBeInTheDocument();
+    expect(screen.queryByTestId("computer-pip-screen-recording")).toBeNull();
+  });
+
+  it("offers recovery from the capture error even if checking permissions fails", async () => {
+    failWith("Screen Recording permission is unavailable");
+    vi.mocked(computerRpc).mockRejectedValueOnce(new Error("helper restarting"));
+    render(
+      createElement(TooltipProvider, null, createElement(ComputerPip, { sessions: [session] })),
+    );
+    expect(await screen.findByRole("button", { name: "Allow Screen Recording" })).toBeEnabled();
+  });
+
+  it("recognizes a permission failure after an earlier unrelated capture error", async () => {
+    failWith("that session is not controlling an app");
+    vi.mocked(computerRpc).mockResolvedValueOnce({
+      platform: "macos",
+      accessibility: "granted",
+      screenRecording: "granted",
+      supported: true,
+    });
+    render(
+      createElement(TooltipProvider, null, createElement(ComputerPip, { sessions: [session] })),
+    );
+    await screen.findByText("that session is not controlling an app");
+    await act(async () => {
+      vi.mocked(streamComputerFrames).mock.calls.at(-1)![3]?.(
+        "the helper does not have the screenRecording permission",
+      );
+    });
+    expect(
+      await screen.findByRole("button", { name: "Allow Screen Recording" }),
+    ).toBeInTheDocument();
+  });
+
+  it("rechecks a stale granted result while capture failures continue", async () => {
+    vi.useFakeTimers();
+    failWith("Could not capture the window");
+    vi.mocked(computerRpc).mockResolvedValue({
+      platform: "macos",
+      accessibility: "granted",
+      screenRecording: "granted",
+      supported: true,
+    });
+    await act(async () => {
+      render(
+        createElement(TooltipProvider, null, createElement(ComputerPip, { sessions: [session] })),
+      );
+    });
+    expect(screen.queryByRole("button", { name: "Allow Screen Recording" })).toBeNull();
+    vi.mocked(computerRpc).mockResolvedValue({
+      platform: "macos",
+      accessibility: "granted",
+      screenRecording: "denied",
+      supported: true,
+    });
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
+    expect(screen.getByRole("button", { name: "Allow Screen Recording" })).toBeInTheDocument();
+  });
+
+  it("offers recovery when preview startup itself rejects for missing permission", async () => {
+    vi.mocked(streamComputerFrames).mockRejectedValueOnce(
+      new Error("Screen Recording access denied"),
+    );
+    render(
+      createElement(TooltipProvider, null, createElement(ComputerPip, { sessions: [session] })),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Allow Screen Recording" }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not offer macOS permission recovery for Windows notApplicable grants", async () => {
+    failWith("target window is unavailable");
+    vi.mocked(computerRpc).mockResolvedValueOnce({
+      platform: "windows",
+      accessibility: "notApplicable",
+      screenRecording: "notApplicable",
+      supported: true,
+    });
+    render(
+      createElement(TooltipProvider, null, createElement(ComputerPip, { sessions: [session] })),
+    );
+    await screen.findByText("target window is unavailable");
+    expect(screen.queryByRole("button", { name: "Allow Screen Recording" })).toBeNull();
+  });
+
+  it("replaces a stale frame with permission recovery and restores the next good frame", async () => {
+    const frame: ComputerScreenshot = {
+      id: "frame-1",
+      path: "/tmp/frame.jpg",
+      width: 2,
+      height: 2,
+      bytes: 1,
+      origin: { x: 0, y: 0 },
+      scale: 1,
+      format: "jpeg",
+      base64: "",
+    };
+    vi.mocked(streamComputerFrames).mockImplementationOnce(async (_session, _width, onFrame) => {
+      onFrame(frame);
+      return () => {};
+    });
+    render(
+      createElement(TooltipProvider, null, createElement(ComputerPip, { sessions: [session] })),
+    );
+    expect(await screen.findByRole("img", { name: "What the agent sees" })).toBeInTheDocument();
+    const [, , onFrame, onFailure] = vi.mocked(streamComputerFrames).mock.calls.at(-1)!;
+    await act(async () => onFailure?.("Screen Recording permission missing"));
+    expect(screen.getByRole("button", { name: "Allow Screen Recording" })).toBeInTheDocument();
+    expect(screen.queryByRole("img")).toBeNull();
+    await act(async () => onFrame(frame));
+    expect(screen.getByRole("img", { name: "What the agent sees" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Allow Screen Recording" })).toBeNull();
   });
 });

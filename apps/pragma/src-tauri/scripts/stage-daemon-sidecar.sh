@@ -55,44 +55,10 @@ for crate in "${rust_sidecars[@]}"; do
   cargo build -p "$crate" $cargo_profile_flag
 done
 
-# macOS: System Settings will not grant Accessibility or Screen Recording to a
-# bare debug binary (it carries only a `linker-signed` ad hoc signature, and
-# the list refuses it). Wrap the computer-use helper in a minimal app bundle
-# beside it, which `pragma-server` prefers (`helper_path`), and sign the bundle
-# ad hoc under the helper's bundle id. The bundle is rebuilt only when the
-# binary's contents changed (a stamp of the source hash, since signing rewrites
-# the copy and mtimes drift), so an unchanged helper keeps its grants.
-if [[ "$profile" == "debug" && "$(uname -s)" == "Darwin" ]]; then
-  values="$repo_root/packages/constants/values.json"
-  helper_id="$(sed -n 's/.*"macHelperBundleId": *"\([^"]*\)".*/\1/p' "$values")"
-  helper_app_name="$(sed -n 's/.*"macHelperAppName": *"\([^"]*\)".*/\1/p' "$values")"
-  helper="$repo_root/target/debug/pragma-computer"
-  bundle="$repo_root/target/debug/$helper_app_name.app"
-  bundled_helper="$bundle/Contents/MacOS/pragma-computer"
-  stamp="$repo_root/target/debug/.pragma-computer-bundle.sha"
-  source_sha="$(shasum -a 256 "$helper" | cut -d' ' -f1)"
-  if [[ ! -f "$bundled_helper" || "$(cat "$stamp" 2>/dev/null)" != "$source_sha" ]]; then
-    rm -rf "$bundle"
-    mkdir -p "$bundle/Contents/MacOS"
-    cp "$helper" "$bundled_helper"
-    cat >"$bundle/Contents/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleIdentifier</key><string>$helper_id</string>
-  <key>CFBundleName</key><string>$helper_app_name</string>
-  <key>CFBundleExecutable</key><string>pragma-computer</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleVersion</key><string>1</string>
-  <key>LSUIElement</key><true/>
-</dict>
-</plist>
-PLIST
-    codesign --force --sign - --identifier "$helper_id" "$bundle"
-    echo "$source_sha" >"$stamp"
-    echo "bundled pragma-computer -> target/debug/$helper_app_name.app"
-  fi
+# The helper has its own TCC identity in dev and in signed release bundles.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  # shellcheck disable=SC2086 # empty means debug; --release chooses release.
+  bun "$script_dir/stage-macos-helper.ts" $cargo_profile_flag
 fi
 
 # Bun-compiled sidecars: `<workspace filter>:<package dir>:<binary name>`.
