@@ -47,6 +47,7 @@ import {
   onAgentNotificationClick,
   paletteSearch,
   pathExists,
+  prepareAgentLaunch,
   ptyAttach,
   ptyDetach,
   ptySpawn,
@@ -55,6 +56,8 @@ import {
   readFile,
   renameFile,
   renameWorktree,
+  restoreAgentSession,
+  sessionRestoreStatus,
   restoreFanoutTab,
   setSplitLayout,
   setTabTitle,
@@ -77,6 +80,11 @@ import {
 } from "./tauri";
 
 describe("stream IPC wrappers", () => {
+  it("reads host recovery progress without initiating restoration", async () => {
+    invokeMock.mockResolvedValueOnce([]);
+    expect(await sessionRestoreStatus()).toEqual([]);
+    expect(invokeMock).toHaveBeenCalledWith("session_restore_status");
+  });
   it("sends home-tab notifications with a nullable project and listens only on this window", async () => {
     await showAgentNotification("Finished", "Home tab", null, "mini-home", "mini-tab");
     expect(invokeMock).toHaveBeenCalledWith("show_agent_notification", {
@@ -152,6 +160,45 @@ describe("stream IPC wrappers", () => {
       "pty_spawn_detached",
       expect.objectContaining({ env: [["CODEX_HOME", "/h"]] }),
     );
+  });
+
+  it("routes launch preparation through the typed host adapter", async () => {
+    invokeMock.mockResolvedValueOnce({
+      command: ["pragma-cli", "agent", "run", "--run-id", "r1", "--", "opencode"],
+      runId: "r1",
+    });
+    await expect(
+      prepareAgentLaunch("worktree", "session", "opencode", ["opencode"], {
+        modelId: "sonnet",
+      }),
+    ).resolves.toEqual({
+      command: ["pragma-cli", "agent", "run", "--run-id", "r1", "--", "opencode"],
+      runId: "r1",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("prepare_agent_launch", {
+      worktreeId: "worktree",
+      tabId: "session",
+      agentId: "opencode",
+      command: ["opencode"],
+      selection: { modelId: "sonnet" },
+    });
+  });
+
+  it("defaults a missing launch selection to null", () => {
+    void prepareAgentLaunch("worktree", "session", "opencode", ["opencode"]);
+    expect(invokeMock).toHaveBeenCalledWith(
+      "prepare_agent_launch",
+      expect.objectContaining({ selection: null }),
+    );
+  });
+
+  it("routes session restore through the typed host adapter", async () => {
+    invokeMock.mockResolvedValueOnce(true);
+    await expect(restoreAgentSession("worktree", "session")).resolves.toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith("restore_agent_session", {
+      worktreeId: "worktree",
+      tabId: "session",
+    });
   });
 
   it("tracks and stops exact filesystem subscriptions", async () => {

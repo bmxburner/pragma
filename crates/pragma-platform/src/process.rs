@@ -103,6 +103,57 @@ pub fn detach(command: &mut Command) {
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Keeps this process alive through terminal-generated cancellation signals so
+/// a supervisor can observe the child it started.
+///
+/// This is what lets `pragma-cli agent run` report the agent's *real* exit
+/// after a Ctrl-C instead of dying first and leaving the host to reconcile an
+/// interrupted run.
+///
+/// **Windows** delivers Ctrl-C and Ctrl-Break as console control events to
+/// every process attached to the console, so the default disposition would end
+/// the wrapper and the agent at the same time. A safe `ctrlc` handler (the
+/// crate wraps `SetConsoleCtrlHandler`) returns `TRUE` for both events and
+/// leaves the wrapper running. Control handlers are **not inherited** by child
+/// processes, and `ctrlc` registers a real handler rather than the special
+/// `SetConsoleCtrlHandler(NULL, TRUE)` ignore flag (that flag *is* inherited),
+/// so the agent's TUI still receives Ctrl-C normally.
+///
+/// **Unix** registers `SIGINT`, `SIGTERM`, and `SIGHUP` against a flag.
+/// Signal handlers are reset across `exec`, so the child keeps default
+/// dispositions there too. The CLI supervisor currently keeps its own
+/// `signal-hook` registration on Unix; this seam is ready for it to adopt.
+///
+/// Idempotent: later calls return the first call's result instead of failing
+/// with a duplicate-handler error.
+pub fn survive_terminal_signals() -> Result<(), String> {
+    static GUARD: OnceLock<Result<(), String>> = OnceLock::new();
+    GUARD.get_or_init(install_terminal_signal_guard).clone()
+}
+
+#[cfg(windows)]
+fn install_terminal_signal_guard() -> Result<(), String> {
+    ctrlc::set_handler(|| {})
+        .map_err(|error| format!("could not install the console control handler: {error}"))
+}
+
+#[cfg(unix)]
+fn install_terminal_signal_guard() -> Result<(), String> {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    let flag = Arc::new(AtomicBool::new(false));
+    for signal in [
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGHUP,
+    ] {
+        signal_hook::flag::register(signal, Arc::clone(&flag))
+            .map_err(|error| format!("could not guard terminal signal {signal}: {error}"))?;
+    }
+    Ok(())
+}
+
 /// A process in the host's process table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessEntry {
@@ -396,7 +447,7 @@ mod tests {
 
     use super::{
         is_running, list_processes, matching_process_roots, parse_tasklist_image_name,
-        process_name, ProcessEntry,
+        process_name, survive_terminal_signals, ProcessEntry,
     };
 
     #[test]
@@ -493,5 +544,20 @@ mod tests {
     #[test]
     fn an_empty_tasklist_response_yields_nothing() {
         assert_eq!(parse_tasklist_image_name(""), None);
+    }
+
+    /// Every supported target must install a real guard. A `cfg(not(unix))`
+    /// no-op would compile here on Windows but leave the wrapper to die before
+    /// it reports the child's exit, so the assertion runs on both families.
+    #[test]
+    fn terminal_signal_guarding_is_implemented_and_idempotent() {
+        assert!(
+            survive_terminal_signals().is_ok(),
+            "installing the terminal signal guard must succeed"
+        );
+        assert!(
+            survive_terminal_signals().is_ok(),
+            "a second call must return the first result instead of a duplicate-handler error"
+        );
     }
 }

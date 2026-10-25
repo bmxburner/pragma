@@ -28,6 +28,14 @@ Use these user-facing terms:
 
 Auto mode follows the user's `automode.md` (`~/.pragma/automode.md`, overridden by `<project>/.pragma/automode.md`): YAML frontmatter `agents`/`models` `include`/`exclude` globs (`model` or `agent/model`) plus `priority` (`accuracy`, `speed`, `efficiency`, `balanced`), then free-text notes the System 1 model treats as the user's priorities. When a user asks to change how Auto picks, edit that file instead of changing their launches.
 
+Sessions are host-owned: closing or reloading the desktop does not end them. After a host
+restart, plain shells reopen fresh — there is no shell snapshot — while interrupted agent
+sessions launched through Pragma resume for the nine official integrations that declare a
+`launch.resume` callback (Prime Agent deliberately does not). Resume restores the conversation,
+never the original prompt or startup input. Runtime status is ephemeral; the durable recovery
+identity is the host's invocation record plus the harness session id an integration reports
+through `reportSessionId` / `agent report session-id`.
+
 Do not lead with servers, sockets, sidecars, protocol frames, Tauri, or crate names. Those describe implementation, not how agent or user gets work done.
 
 ## Choose Public Surface

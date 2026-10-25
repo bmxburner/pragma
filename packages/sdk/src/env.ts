@@ -4,6 +4,8 @@ export const PRAGMA_ENV_KEYS = {
   gatewayToken: "PRAGMA_GATEWAY_TOKEN",
   tabId: "PRAGMA_TAB_ID",
   worktreeId: "PRAGMA_WORKTREE_ID",
+  /** Opaque id Pragma assigns to one agent run; carried on every report from it. */
+  agentRunId: "PRAGMA_AGENT_RUN_ID",
 } as const;
 
 export type PragmaEnv = Record<string, string | undefined>;
