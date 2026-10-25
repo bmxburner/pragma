@@ -143,8 +143,10 @@ Prefill waits `PREFILL_SUBMIT_DELAY_MS` before its Enter: Codex 0.160 reads a fa
 keystrokes as a paste and turns an Enter inside it into a newline, which left the prompt
 typed but never submitted.
 
-Launcher passes `--enable default_mode_request_user_input`; without it, Codex 0.144.4 only
-offers the tool in Plan mode and verification prompts cannot create question reports. Watcher
+Launcher passes `--no-daemon` (so each tab owns its own process instead of sharing the
+background app-server) and `--enable default_mode_request_user_input`; without the feature
+flag, Codex 0.144.4 only offers the tool in Plan mode and verification prompts cannot create
+question reports. Watcher
 keeps `handleDecisions: false` for command decisions but enables question answers. Listed
 answers use Codex's digit shortcuts and dismissal sends Escape. Custom free-text answers
 open the native final answer row, type into its editor, and submit with Enter. Answers never
@@ -255,17 +257,18 @@ A sidecar binary older than that fix keeps serving the first import (ESM module 
 until the sidecar process itself restarts — kill `pragma-plugins` (its supervisor
 respawns it lazily and the cached catalog holds in the meantime) or restart the detached
 `pragma-server`. Confirm with `GET /v1/agents/catalog` that the `pragma.codex` launch
-commands include `--enable default_mode_request_user_input` before running headless
-`agent verify` — without the flag Codex never exposes the question tool and every
-question scenario times out with the agent answering in plain text.
+commands include `--no-daemon` and `--enable default_mode_request_user_input` before
+running headless `agent verify` — without the feature flag Codex never exposes the
+question tool and every question scenario times out with the agent answering in plain text.
 
 A correct catalog is still not sufficient while the desktop app is running: the server
 forwards `agentSessionLaunch` to the app controller, and the app builds the spawn
-command from its own plugin copy — a stale app silently drops the `--enable` flag even
-though the gateway catalog shows it. Quit the desktop app before `agent verify` so
-launches take the server's headless path (fresh sidecar catalog); persistent terminal
-sessions survive because PTYs live in `pragma-server`. Confirm by inspecting the spawned
-process: `ps -o command= -p $(pgrep -x codex)` must show the `--enable` flag.
+command from its own plugin copy — a stale app silently drops `--no-daemon` /
+`--enable` even though the gateway catalog shows them. Quit the desktop app before
+`agent verify` so launches take the server's headless path (fresh sidecar catalog);
+persistent terminal sessions survive because PTYs live in `pragma-server`. Confirm by
+inspecting the spawned process: `ps -o command= -p $(pgrep -x codex)` must show both
+flags.
 
 ## Verification
 

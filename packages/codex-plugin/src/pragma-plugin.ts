@@ -98,7 +98,9 @@ export const codexAgentPlugin: PluginDefinition = definePlugin({
       name: "Codex",
       icon: () => null,
       iconPath: "assets/codex.png",
-      launch: { command: ["codex", "--enable", "default_mode_request_user_input"] },
+      launch: {
+        command: ["codex", "--no-daemon", "--enable", "default_mode_request_user_input"],
+      },
       prefillDelayMs: 4000,
       prefillMode: "plain",
       prefillSubmit: "\r",
