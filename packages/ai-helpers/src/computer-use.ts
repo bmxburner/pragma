@@ -66,7 +66,7 @@ export function computerQuestions(request: ComputerDecideRequest): Record<string
 }
 
 /** Controls are bounded and ranked before asking the model. */
-export function offeredItems(request: ComputerDecideRequest) {
+function offeredItems(request: ComputerDecideRequest) {
   const words = request.instruction
     .toLowerCase()
     .split(/\W+/)
@@ -132,25 +132,40 @@ export function computerDecision(
   const questions = computerQuestions(request);
   const next = chosen(answers.next);
   const item = chosen(answers.item);
-  const probabilities = Object.values(item?.probabilities ?? {}).toSorted((a, b) => b - a);
   if (!next || !Object.hasOwn(ACTIONS, next.choice))
     throw new Error("Invalid computer action choice");
+  validateChoices(questions, answers);
+  return {
+    kind: next.choice as ComputerDecision["kind"],
+    confidence: next.confidence,
+    achieved: answers.achieved?.type === "noul" ? answers.achieved.noul : 0,
+    ...itemEvidence(item),
+    variable:
+      request.variables.length === 1 ? request.variables[0] : chosen(answers.variable)?.choice,
+    key: chosen(answers.key)?.choice,
+    app: chosen(answers.app)?.choice,
+  };
+}
+
+function validateChoices(
+  questions: Record<string, Question>,
+  answers: Record<string, import("@pragma-sh/system1").Answer>,
+): void {
   for (const [id, answer] of Object.entries(answers)) {
     const pick = chosen(answer);
     const question = questions[id];
     if (pick && question?.type === "choice" && !Object.hasOwn(question.criteria, pick.choice))
       throw new Error(`Unlisted computer ${id} choice`);
   }
-  return {
-    kind: next.choice as ComputerDecision["kind"],
-    confidence: next.confidence,
-    achieved: answers.achieved?.type === "noul" ? answers.achieved.noul : 0,
-    item: item?.choice,
-    itemConfidence: item?.confidence,
-    itemMargin: probabilities.length > 1 ? (probabilities[0] ?? 0) - (probabilities[1] ?? 0) : 1,
-    variable:
-      request.variables.length === 1 ? request.variables[0] : chosen(answers.variable)?.choice,
-    key: chosen(answers.key)?.choice,
-    app: chosen(answers.app)?.choice,
-  };
+}
+
+function choiceMargin(item: ChoiceAnswer | undefined): number {
+  const probabilities = Object.values(item?.probabilities ?? {}).toSorted((a, b) => b - a);
+  return probabilities.length > 1 ? (probabilities[0] ?? 0) - (probabilities[1] ?? 0) : 1;
+}
+
+function itemEvidence(
+  item: ChoiceAnswer | undefined,
+): Pick<ComputerDecision, "item" | "itemConfidence" | "itemMargin"> {
+  return { item: item?.choice, itemConfidence: item?.confidence, itemMargin: choiceMargin(item) };
 }

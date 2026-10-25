@@ -19,6 +19,7 @@ architecture** with **consistent conventions across TypeScript and Rust**.
   - `hooks/` — React hooks (use-shortcuts: keybindings; use-escape-to-close: modal dismiss).
   - `state/` — workspace metadata state for projects, worktrees, tabs, selection, icons.
   - `lib/utils.ts` — `cn()` + small reusable helpers.
+  - `lib/external-store.ts` — synchronous snapshots and stable subscriptions shared by frontend stores.
 - `apps/pragma/src-tauri/` — Rust backend (`src/lib.rs` = wiring; modules for db, pty, git, projects, worktrees, scripts, icons).
 - `crates/pragma-cli/` — `pragma-cli` helper CLI that external agents call from terminals.
 - `crates/pragma-client/` — Rust native-client transport, frame I/O, and SSH streamlocal bridge.

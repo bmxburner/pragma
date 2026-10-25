@@ -1,5 +1,7 @@
 import { useSyncExternalStore } from "react";
 
+import { createExternalStore } from "@/lib/external-store";
+
 import type {
   ComputerActivityEvent,
   ComputerActivitySnapshot,
@@ -196,43 +198,31 @@ export function applyComputerMessage(
   return applyDelta(state, message.payload);
 }
 
-let state: ComputerUseState = INITIAL_COMPUTER_USE;
-const listeners = new Set<() => void>();
+const store = createExternalStore(INITIAL_COMPUTER_USE);
 let started: Promise<void> | null = null;
-
-function setState(next: ComputerUseState): void {
-  if (next === state) return;
-  state = next;
-  for (const listener of listeners) listener();
-}
-
-function subscribe(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
-}
 
 /** Re-reads the whole picture from the host (after the user unpauses, say). */
 export async function refreshComputerUse(): Promise<void> {
   try {
     const snapshot = await computerRpc<ComputerActivitySnapshot>({ op: "status" });
-    setState(applyComputerMessage(state, { kind: "snapshot", payload: snapshot }));
+    store.set(applyComputerMessage(store.get(), { kind: "snapshot", payload: snapshot }));
   } catch {
     // The host may still be starting; the bridge's snapshot will arrive.
   }
 }
 
 /** Starts mirroring the activity stream in this window (idempotent). */
-export function startComputerUseBridge(): Promise<void> {
-  started ??= onComputerActivity((message) => setState(applyComputerMessage(state, message))).then(
-    () => refreshComputerUse(),
-  );
+function startComputerUseBridge(): Promise<void> {
+  started ??= onComputerActivity((message) =>
+    store.set(applyComputerMessage(store.get(), message)),
+  ).then(() => refreshComputerUse());
   return started;
 }
 
 /** The mirrored state; starts the bridge on first use. */
 export function useComputerUse(): ComputerUseState {
   void startComputerUseBridge();
-  return useSyncExternalStore(subscribe, () => state);
+  return useSyncExternalStore(store.subscribe, store.get);
 }
 
 /** Sessions in a worktree. Sessions with no worktree (scripts) belong to none. */

@@ -2007,3 +2007,6 @@ through the helper's `windows.rc`. Keep the SVG as the editable source.
 Helper staging remembers a successful `PRAGMA_DEV_SIGNING_IDENTITY` in the
 gitignored `src-tauri/dev-signing-identity.local`. Explicit environment values
 win; later dev builds reuse that certificate even from a different terminal.
+
+Shared synchronous frontend snapshot stores use `src/lib/external-store.ts` for
+stable subscriptions and change notification; keep domain state in its owning store.

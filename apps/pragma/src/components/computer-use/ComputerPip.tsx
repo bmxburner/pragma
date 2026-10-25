@@ -83,25 +83,28 @@ export function ComputerPip({ sessions }: { sessions: ComputerSession[] }) {
         {frame ? <PipFrame cursor={cursor} frame={frame} /> : <PipPlaceholder failure={failure} />}
         {session.paused ? (
           <div className="absolute inset-x-0 bottom-0 bg-warning/90 px-3 py-1 text-center text-xs font-medium text-background">
-            {session.pauseReason === "stopped"
-              ? "Task stopped — restart to continue"
-              : "Task paused — you're in control"}
+            {pauseMessage(session)}
           </div>
         ) : null}
       </div>
       <div className="flex items-center gap-2 border-t px-3 py-1.5 text-xs">
         <MousePointer2 className="size-3 shrink-0 text-primary" />
-        <span className="min-w-0 flex-1 truncate">
-          {session.paused
-            ? session.pauseReason === "stopped"
-              ? "Task stopped"
-              : "Task paused"
-            : (cursor?.description ?? session.lastDescription ?? "Idle")}
-        </span>
+        <span className="min-w-0 flex-1 truncate">{sessionDescription(session, cursor)}</span>
         <span className="shrink-0 text-muted-foreground">{session.actionCount} steps</span>
       </div>
     </div>
   );
+}
+
+function pauseMessage(session: ComputerSession): string {
+  return session.pauseReason === "stopped"
+    ? "Task stopped — restart to continue"
+    : "Task paused — you're in control";
+}
+
+function sessionDescription(session: ComputerSession, cursor: ComputerCursor | undefined): string {
+  if (session.paused) return session.pauseReason === "stopped" ? "Task stopped" : "Task paused";
+  return cursor?.description ?? session.lastDescription ?? "Idle";
 }
 
 /**

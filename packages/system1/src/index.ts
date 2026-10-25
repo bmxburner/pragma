@@ -240,30 +240,32 @@ const ANSWER_PARSERS: Record<Question["type"], (raw: Record<string, unknown>) =>
   noul: parseNoul,
   choice: parseChoice,
   score: parseScore,
-  box: (raw) => {
-    if (!isRecord(raw.box)) return null;
-    const top = finite(raw.box.top),
-      bottom = finite(raw.box.bottom);
-    const left = finite(raw.box.left),
-      right = finite(raw.box.right);
-    const confidence = raw.confidence == null ? null : finite(raw.confidence);
-    if (
-      top === null ||
-      bottom === null ||
-      left === null ||
-      right === null ||
-      top < 0 ||
-      left < 0 ||
-      bottom > 1 ||
-      right > 1 ||
-      bottom <= top ||
-      right <= left ||
-      (raw.confidence != null && (confidence === null || confidence < 0 || confidence > 1))
-    )
-      return null;
-    return { type: "box", box: { top, bottom, left, right }, confidence };
-  },
+  box: parseBox,
 };
+
+function normalized(value: unknown): number | null {
+  const number = finite(value);
+  return number !== null && number >= 0 && number <= 1 ? number : null;
+}
+
+function boxCoordinates(raw: unknown): BoxAnswer["box"] | null {
+  if (!isRecord(raw)) return null;
+  const top = normalized(raw.top),
+    bottom = normalized(raw.bottom);
+  const left = normalized(raw.left),
+    right = normalized(raw.right);
+  if (top === null || bottom === null || left === null || right === null) return null;
+  if (bottom <= top || right <= left) return null;
+  return { top, bottom, left, right };
+}
+
+function parseBox(raw: Record<string, unknown>): BoxAnswer | null {
+  const box = boxCoordinates(raw.box);
+  if (!box) return null;
+  const confidence = raw.confidence == null ? null : normalized(raw.confidence);
+  if (raw.confidence != null && confidence === null) return null;
+  return { type: "box", box, confidence };
+}
 
 function parseUsage(raw: unknown): { inputTokens: number; outputTokens: number } {
   const usage = isRecord(raw) ? raw : {};
@@ -448,16 +450,21 @@ async function requestBody(
   for (const { reference, bytes } of decoded) {
     if (!reference || !json.includes(JSON.stringify(reference).slice(1, -1)))
       throw new System1Error("bad-request", "Every image reference must appear in the request");
-    const png = [137, 80, 78, 71, 13, 10, 26, 10].every((b, i) => bytes[i] === b);
-    const jpeg = bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
-    if (!png && !jpeg) throw new System1Error("bad-request", "Image assets must be PNG or JPEG");
     const name = `asset-${parts.length}`;
     references[reference] = { type: "image", part: name };
-    parts.push({
-      name,
-      blob: new Blob([bytes.slice().buffer], { type: png ? "image/png" : "image/jpeg" }),
-    });
+    parts.push({ name, blob: imageBlob(bytes) });
   }
+  return multipartRequest({ ...payload, assets: references }, parts);
+}
+
+function imageBlob(bytes: Uint8Array): Blob {
+  const png = [137, 80, 78, 71, 13, 10, 26, 10].every((b, i) => bytes[i] === b);
+  const jpeg = bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
+  if (!png && !jpeg) throw new System1Error("bad-request", "Image assets must be PNG or JPEG");
+  return new Blob([bytes.slice().buffer], { type: png ? "image/png" : "image/jpeg" });
+}
+
+function multipartRequest(payload: unknown, parts: { name: string; blob: Blob }[]) {
   const boundary = `pragma-${crypto.randomUUID()}`;
   const chunks: BlobPart[] = [];
   const append = (name: string, type: string, value: BlobPart, filename?: string) => {
@@ -467,7 +474,7 @@ async function requestBody(
       "\r\n",
     );
   };
-  append("request", "application/json", JSON.stringify({ ...payload, assets: references }));
+  append("request", "application/json", JSON.stringify(payload));
   for (const { name, blob } of parts) append(name, blob.type, blob, name);
   chunks.push(`--${boundary}--\r\n`);
   return {

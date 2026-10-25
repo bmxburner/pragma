@@ -54,13 +54,7 @@ export class Transport {
       ...options.headers,
       authorization: `Bearer ${token}`,
     };
-    let body: BodyInit | undefined;
-    if (options.rawBody) {
-      body = options.rawBody as unknown as BodyInit;
-    } else if (options.body !== undefined) {
-      headers["content-type"] = headers["content-type"] ?? "application/json";
-      body = JSON.stringify(options.body);
-    }
+    const body = requestBody(options, headers);
     let response: Response;
     try {
       response = await this.fetch(urlFor(this.baseUrl, path), {
@@ -124,4 +118,14 @@ async function gatewayError(response: Response): Promise<PragmaGatewayError> {
 
 function stripTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
+}
+
+function requestBody(
+  options: RequestOptions,
+  headers: Record<string, string>,
+): BodyInit | undefined {
+  if (options.rawBody) return options.rawBody as unknown as BodyInit;
+  if (options.body === undefined) return undefined;
+  headers["content-type"] ??= "application/json";
+  return JSON.stringify(options.body);
 }

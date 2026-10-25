@@ -1,4 +1,3 @@
-// fallow-ignore-file unused-class-member -- Public SDK computer-use namespace.
 import type {
   ComputerActivityEvent,
   ComputerActivitySnapshot,

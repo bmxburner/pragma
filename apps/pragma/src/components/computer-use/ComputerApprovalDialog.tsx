@@ -62,9 +62,6 @@ function ComputerApprovalPrompt({ approval }: { approval: ComputerApproval }) {
     }
   };
 
-  const sensitive = approval.sensitive;
-  const target = approval.target?.appName;
-
   return (
     <AlertDialog open>
       <AlertDialogContent>
@@ -76,15 +73,7 @@ function ComputerApprovalPrompt({ approval }: { approval: ComputerApproval }) {
             {needsPermissions ? "Enable computer-use permissions" : approval.reason}
           </AlertDialogTitle>
           <AlertDialogDescription>
-            {needsPermissions
-              ? "Before approving this request, allow Accessibility and Screen Recording for Pragma Computer Use in macOS. This popup will continue automatically once both are enabled."
-              : !ready
-                ? "Checking computer-use permissions before continuing."
-                : sensitive
-                  ? "This control can change or send something. Allow just this one action?"
-                  : `It will be able to read the screen and click and type${
-                      target ? ` in ${target}` : ""
-                    } while you watch. You can stop it at any time from the sidebar or with the stop shortcut.`}
+            {approvalDescription(approval, needsPermissions, ready)}
           </AlertDialogDescription>
         </AlertDialogHeader>
         {!ready ? (
@@ -109,28 +98,69 @@ function ComputerApprovalPrompt({ approval }: { approval: ComputerApproval }) {
           <Button disabled={busy} onClick={() => void answer("deny")} variant="outline">
             Deny
           </Button>
-          {!ready ? (
-            error ? (
-              <Button onClick={() => void load()} variant="outline">
-                Check again
-              </Button>
-            ) : null
-          ) : sensitive ? (
-            <Button disabled={busy} onClick={() => void answer("once")}>
-              Allow once
-            </Button>
-          ) : (
-            <>
-              <Button disabled={busy} onClick={() => void answer("always")} variant="outline">
-                Always allow
-              </Button>
-              <Button disabled={busy} onClick={() => void answer("session")}>
-                Allow for this session
-              </Button>
-            </>
-          )}
+          <ApprovalActions
+            approval={approval}
+            ready={ready}
+            error={error}
+            busy={busy}
+            answer={answer}
+            load={load}
+          />
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
+  );
+}
+
+function approvalDescription(
+  approval: ComputerApproval,
+  needsPermissions: boolean,
+  ready: boolean,
+): string {
+  if (needsPermissions)
+    return "Before approving this request, allow Accessibility and Screen Recording for Pragma Computer Use in macOS. This popup will continue automatically once both are enabled.";
+  if (!ready) return "Checking computer-use permissions before continuing.";
+  if (approval.sensitive)
+    return "This control can change or send something. Allow just this one action?";
+  const target = approval.target?.appName;
+  return `It will be able to read the screen and click and type${target ? ` in ${target}` : ""} while you watch. You can stop it at any time from the sidebar or with the stop shortcut.`;
+}
+
+function ApprovalActions({
+  approval,
+  ready,
+  error,
+  busy,
+  answer,
+  load,
+}: {
+  approval: ComputerApproval;
+  ready: boolean;
+  error: string | null;
+  busy: boolean;
+  answer: (decision: "once" | "session" | "always" | "deny") => Promise<void>;
+  load: () => Promise<void>;
+}) {
+  if (!ready)
+    return error ? (
+      <Button onClick={() => void load()} variant="outline">
+        Check again
+      </Button>
+    ) : null;
+  if (approval.sensitive)
+    return (
+      <Button disabled={busy} onClick={() => void answer("once")}>
+        Allow once
+      </Button>
+    );
+  return (
+    <>
+      <Button disabled={busy} onClick={() => void answer("always")} variant="outline">
+        Always allow
+      </Button>
+      <Button disabled={busy} onClick={() => void answer("session")}>
+        Allow for this session
+      </Button>
+    </>
   );
 }
