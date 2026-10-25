@@ -1,9 +1,5 @@
 {
   "approvalMode": "unrestricted",
-  "mcpAllowlist": [
-    "*:*"
-  ],
-  "terminalAllowlist": [
-    "*"
-  ]
+  "mcpAllowlist": ["*:*"],
+  "terminalAllowlist": ["*"]
 }
