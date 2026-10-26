@@ -125,6 +125,14 @@ exercise them by piping NDJSON into `target/debug/pragma-computer`, or through
 
 `src/windows/ffi.rs` owns MTA initialization, cached UIA property reads, Invoke/Value patterns, elevation checks, and Win32 input. `input.rs` checks stop/focus between down events and always releases held keys/buttons. `mod.rs` handles app/window resolution and snapshot revalidation; `windows.manifest` declares PerMonitorV2 and asInvoker. `windows.rc` embeds that manifest and the helper's cursor icon. Only the helper links these APIs; the server still builds with native features disabled.
 
+**The elevation guard compares tokens, never the target alone.** Windows blocks input and
+UIA across an integrity boundary, not at "elevated" itself, so an elevated helper drives
+elevated windows normally. Refusing every elevated target while the helper itself was
+elevated (Pragma started as administrator, or UAC off) meant Pragma could open a window
+and then never touch it — and every app it launched inherited its elevation. Refuse only
+when the target is elevated and the helper is not, and say so, since the fix is to relaunch
+Pragma elevated.
+
 Windows takeover currently detects held keys/buttons, not recent wheel events. Foreground and capture behavior must be exercised on Windows 10/11 with mixed DPI; passing a source cross-check is not that validation.
 
 Session cancellation uses `inSession` and reader-thread `setSessionPaused`. `StopFlag` captures a session epoch when queued: pause/resume invalidates older actions without stopping other sessions. Native event-boundary checks also probe physical input in the target pid; the server turns `userTakeover` into a durable pause. Keep modifier/button releases unconditional when interrupted.

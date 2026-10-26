@@ -12,8 +12,8 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 use windows::Win32::System::Threading::{
-    OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationCacheRequest, IUIAutomationElement,
@@ -266,24 +266,12 @@ pub fn process_path(pid: u32) -> Option<String> {
         Some(String::from_utf16_lossy(&buffer[..len as usize]))
     }
 }
-pub fn refuse_elevated(pid: u32) -> ComputerResult<()> {
-    // SAFETY: handles returned by Windows are closed; TOKEN_ELEVATION and its length match the query.
+/// Reads `TokenElevation` for an already-open process handle.
+fn token_elevated(process: HANDLE) -> Option<bool> {
+    // SAFETY: the borrowed process handle stays open for the call; the token it yields is closed here.
     unsafe {
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).map_err(|_| {
-            failure(
-                ComputerErrorCode::TargetElevated,
-                "Target process cannot be queried",
-            )
-        })?;
         let mut token = HANDLE::default();
-        let opened = OpenProcessToken(process, TOKEN_QUERY, &raw mut token);
-        let _ = CloseHandle(process);
-        opened.map_err(|_| {
-            failure(
-                ComputerErrorCode::TargetElevated,
-                "Target token cannot be queried",
-            )
-        })?;
+        OpenProcessToken(process, TOKEN_QUERY, &raw mut token).ok()?;
         let mut elevation = TOKEN_ELEVATION::default();
         let mut needed = 0;
         let result = GetTokenInformation(
@@ -294,20 +282,48 @@ pub fn refuse_elevated(pid: u32) -> ComputerResult<()> {
             &raw mut needed,
         );
         let _ = CloseHandle(token);
-        result.map_err(|_| {
+        result.ok()?;
+        Some(elevation.TokenIsElevated != 0)
+    }
+}
+
+fn self_elevated() -> bool {
+    // SAFETY: GetCurrentProcess returns a pseudo-handle that is never closed and is valid in this process.
+    token_elevated(unsafe { GetCurrentProcess() }).unwrap_or(false)
+}
+
+/// Refuses only a window this helper's token cannot reach.
+///
+/// Windows blocks synthetic input and UI Automation across an integrity boundary,
+/// not at "elevated" itself: an elevated helper controls elevated apps exactly as it
+/// controls standard ones. Refusing every elevated target outright meant that a
+/// Pragma started as administrator could open an app and then never drive it.
+pub fn refuse_elevated(pid: u32) -> ComputerResult<()> {
+    // SAFETY: this limited-query process handle is closed on every path.
+    let target_elevated = unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).map_err(|_| {
             failure(
                 ComputerErrorCode::TargetElevated,
-                "Target elevation cannot be checked",
+                "Target process cannot be queried",
             )
         })?;
-        if elevation.TokenIsElevated != 0 {
-            return Err(failure(
-                ComputerErrorCode::TargetElevated,
-                "Elevated applications are not controlled",
-            ));
-        }
+        let elevated = token_elevated(process);
+        let _ = CloseHandle(process);
+        elevated
+    };
+    let target_elevated = target_elevated.ok_or_else(|| {
+        failure(
+            ComputerErrorCode::TargetElevated,
+            "Target elevation cannot be checked",
+        )
+    })?;
+    if !target_elevated || self_elevated() {
+        return Ok(());
     }
-    Ok(())
+    Err(failure(
+        ComputerErrorCode::TargetElevated,
+        "This window runs elevated; restart Pragma as administrator to control it",
+    ))
 }
 pub fn launch(app: &str, argument: Option<&str>) -> ComputerResult<()> {
     let file = wide(app);
@@ -509,5 +525,21 @@ pub fn process_aumid(pid: u32) -> Option<String> {
         Some(String::from_utf16_lossy(
             &value[..value.iter().position(|c| *c == 0).unwrap_or(value.len())],
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The invariant the guard exists for: a process the helper shares an integrity
+    /// level with is controllable, whether that level is standard or elevated.
+    #[test]
+    fn own_process_is_controllable() {
+        assert!(refuse_elevated(std::process::id()).is_ok());
+        assert_eq!(
+            token_elevated(unsafe { GetCurrentProcess() }),
+            Some(self_elevated())
+        );
     }
 }
