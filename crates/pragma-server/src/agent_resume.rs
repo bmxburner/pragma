@@ -40,7 +40,7 @@ use pragma_core::tabs::{PreparedAgentLaunch, RestoreAgentSessionResult};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::invocations::{InvocationRecord, NewInvocation};
+use crate::invocations::{InvocationRecord, InvocationState, NewInvocation};
 use crate::plugins_host::PluginsRegistry;
 use crate::registry::Registry;
 
@@ -345,6 +345,26 @@ impl Registry {
         &self,
         prepare: PrepareLaunch,
     ) -> Result<PreparedAgentLaunch, String> {
+        if prepare.worktree_id
+            == pragma_constants::CONSTANTS
+                .mini_window
+                .home_worktree_id
+                .as_str()
+        {
+            // Mini's home tab is a temporary shell context, not a workspace
+            // worktree. Keep its launches untracked rather than requiring a
+            // durable invocation row that cannot be tied to a project.
+            let cwd = pragma_platform::path::home_dir()
+                .ok_or_else(|| "could not resolve the home directory for Mini".to_string())?
+                .to_string_lossy()
+                .into_owned();
+            let command_line = self.command_line_for_tab(&prepare.tab_id, &cwd, &prepare.command);
+            return Ok(PreparedAgentLaunch {
+                command: prepare.command,
+                run_id: None,
+                command_line: Some(command_line),
+            });
+        }
         let (project_id, cwd) = self
             .worktree_location(&prepare.worktree_id)
             .map_err(|error| error.to_string())?;
@@ -536,6 +556,35 @@ impl Registry {
             Ok(false) => Err(format!("stale agent run: {run_id}")),
             Err(error) => Err(error.to_string()),
         }
+    }
+
+    pub(crate) fn handle_fail_run(
+        &self,
+        run_id: &str,
+        reason: &str,
+        server_boot_id: Option<&str>,
+    ) -> Result<(), String> {
+        if let Some(boot_id) = server_boot_id {
+            let current = self.plugins().boot_id();
+            if boot_id != current {
+                return Err(format!(
+                    "stale agent run: {run_id} (authorized by boot {boot_id}, current boot {current})"
+                ));
+            }
+        }
+        let record = self
+            .invocations
+            .record(run_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("stale agent run: {run_id}"))?;
+        if !matches!(
+            record.state,
+            InvocationState::Active | InvocationState::Interrupted | InvocationState::Failed
+        ) {
+            return Err(format!("stale agent run: {run_id}"));
+        }
+        self.fail_record(run_id, reason);
+        Ok(())
     }
 
     /// Proactively restores every interrupted invocation whose tab is still

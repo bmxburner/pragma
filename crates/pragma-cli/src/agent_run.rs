@@ -173,23 +173,48 @@ pub fn run(args: &crate::cli::AgentRunArgs, _out: &output::Output) -> Result<(),
             flush_and_exit(exit.process_code());
         }
         Err(error) => {
-            // The child never ran, so the run is over too — an ordinary end.
-            let journaled = journal_intentional_exit(&args.run_id, ChildExit::Code(1));
-            if let Err(report) = report_run(
+            // A spawn failure says nothing about the saved conversation: keep
+            // it interrupted so recovery can retry after the executable is fixed.
+            let reason = format!("could not run {program}: {error}");
+            if let Err(report) = report_failure_run(
                 &args.run_id,
-                "finishRun",
-                None,
+                &reason,
                 authorized.server_boot_id.as_deref(),
                 FINISH_ATTEMPTS,
             ) {
-                report_failure(&args.run_id, ChildExit::Code(1), journaled, &report);
+                eprintln!("pragma-cli agent run: could not report spawn failure: {report}");
             }
-            Err(CliError::other(format!(
-                "could not run {}: {error}",
-                args.command.first().map_or("", String::as_str)
-            )))
+            Err(CliError::other(reason))
         }
     }
+}
+
+fn report_failure_run(
+    run_id: &str,
+    reason: &str,
+    server_boot_id: Option<&str>,
+    attempts: usize,
+) -> Result<serde_json::Value, CliError> {
+    let mut payload = json!({ "action": "failRun", "runId": run_id, "reason": reason });
+    if let Some(server_boot_id) = server_boot_id.filter(|id| !id.is_empty()) {
+        payload["serverBootId"] = json!(server_boot_id);
+    }
+    let mut last_error = None;
+    for attempt in 0..attempts {
+        match server::rpc_with_timeout(
+            ProtocolRpcMethod::Tabs,
+            payload.clone(),
+            Some(REPORT_TIMEOUT),
+        ) {
+            Ok(reply) => return Ok(reply),
+            Err(error) if is_stale(&error) => return Err(error),
+            Err(error) => last_error = Some(error),
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(REPORT_RETRY_DELAY);
+        }
+    }
+    Err(last_error.unwrap_or_else(|| CliError::other("agent run failure report failed")))
 }
 
 /// Journals an ordinary exit before any report attempt. Returns whether a
@@ -339,29 +364,9 @@ fn flush_and_exit(code: u8) -> ! {
 /// Catches terminal-generated signals for the process's lifetime, without
 /// installing a handler in the child (exec resets caught dispositions, so the
 /// agent's TUI still receives Ctrl-C).
-#[cfg(unix)]
-fn survive_terminal_signals() {
-    use std::sync::atomic::AtomicBool;
-    use std::sync::Arc;
-    let flag = Arc::new(AtomicBool::new(false));
-    for signal in [
-        signal_hook::consts::SIGINT,
-        signal_hook::consts::SIGTERM,
-        signal_hook::consts::SIGHUP,
-    ] {
-        if let Err(error) = signal_hook::flag::register(signal, Arc::clone(&flag)) {
-            eprintln!("pragma-cli agent run: could not guard signal {signal}: {error}");
-        }
-    }
-}
-
-/// Windows delivers Ctrl-C and Ctrl-Break through the console event path; the
-/// platform seam installs a handler so the wrapper survives to report the
-/// child's real exit, while the child keeps its own default handling.
-#[cfg(windows)]
 fn survive_terminal_signals() {
     if let Err(error) = pragma_platform::process::survive_terminal_signals() {
-        eprintln!("pragma-cli agent run: could not guard console signals: {error}");
+        eprintln!("pragma-cli agent run: could not guard terminal signals: {error}");
     }
 }
 

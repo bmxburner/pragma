@@ -85,6 +85,18 @@ pub enum TabsRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         server_boot_id: Option<String>,
     },
+    /// CLI-internal: the supervised child never started (spawn error). Keeps
+    /// the record `failed` so an explicit retry can pick it up after the
+    /// executable is repaired — never an ordinary `ended` completion.
+    FailRun {
+        run_id: String,
+        reason: String,
+        /// Same boot binding as [`Self::FinishRun`]: a previous boot's late
+        /// spawn-failure report must not fail the record the new boot is
+        /// recovering.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server_boot_id: Option<String>,
+    },
 }
 
 /// Result of [`TabsRequest::PrepareAgentLaunch`].
@@ -302,6 +314,21 @@ mod tests {
                 server_boot_id: Some(id),
                 ..
             } if id == "boot-1"
+        ));
+
+        let failed: TabsRequest = serde_json::from_str(
+            r#"{"action":"failRun","runId":"r1","reason":"could not run agent: No such file","serverBootId":"boot-1"}"#,
+        )
+        .expect("a spawn failure carries the authorizing boot");
+        assert!(matches!(
+            failed,
+            TabsRequest::FailRun {
+                run_id,
+                reason,
+                server_boot_id: Some(id),
+            } if run_id == "r1"
+                && reason.contains("No such file")
+                && id == "boot-1"
         ));
     }
 }

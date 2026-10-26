@@ -273,6 +273,7 @@ impl InvocationStore {
 
     /// True when the durable database is actually open.
     #[must_use]
+    #[cfg(test)]
     pub fn is_available(&self) -> bool {
         matches!(self.store, Store::Ready(_))
     }

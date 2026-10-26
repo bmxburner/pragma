@@ -268,37 +268,32 @@ const INVOCATION_CATALOG_WAIT: Duration = Duration::from_secs(15);
 fn start_invocation_reconciler(registry: &Arc<Registry>) {
     let registry = Arc::clone(registry);
     thread::spawn(move || {
-        if !registry.invocations.is_available() {
-            // Without the durable store there is nothing trustworthy to
-            // restore; preparation and on-demand restoration already fail
-            // with the storage cause.
-            return;
-        }
         let interrupted = registry
             .invocations
             .interrupted_and_resumable()
             .is_ok_and(|records| !records.is_empty());
-        if !interrupted {
-            return;
-        }
-        // Wait, bounded, for the plugin sidecar to publish a catalog. The
-        // restore itself is claim-serialized and idempotent, so racing the
-        // desktop's on-demand call is safe either way.
-        let deadline = std::time::Instant::now() + INVOCATION_CATALOG_WAIT;
-        while std::time::Instant::now() < deadline {
-            let ready = registry
-                .plugins()
-                .handle_rpc(&serde_json::json!({ "action": "catalog" }))
-                .is_ok_and(|catalog| {
-                    catalog["agents"]
-                        .as_array()
-                        .is_some_and(|agents| !agents.is_empty())
-                });
-            if ready {
-                break;
+        if interrupted {
+            // Wait, bounded, for the plugin sidecar to publish a catalog. The
+            // restore itself is claim-serialized and idempotent, so racing the
+            // desktop's on-demand call is safe either way.
+            let deadline = std::time::Instant::now() + INVOCATION_CATALOG_WAIT;
+            while std::time::Instant::now() < deadline {
+                let ready = registry
+                    .plugins()
+                    .handle_rpc(&serde_json::json!({ "action": "catalog" }))
+                    .is_ok_and(|catalog| {
+                        catalog["agents"]
+                            .as_array()
+                            .is_some_and(|agents| !agents.is_empty())
+                    });
+                if ready {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(500));
             }
-            thread::sleep(Duration::from_millis(500));
         }
+        // Also settles startup progress when the store is unavailable or
+        // there were no interrupted records.
         registry.reconcile_invocations();
     });
 }
@@ -811,22 +806,17 @@ fn handle_tabs_rpc(
         // spawn-time env resolved differently or timed out, and it echoes the
         // boot id on `finishRun` so a report from a previous server boot is
         // stale.
-        pragma_core::tabs::TabsRequest::StartRun { run_id } => {
-            registry.handle_start_run(&run_id).map(|authorized| {
-                serde_json::json!({
-                    "ok": true,
-                    "env": authorized.env,
-                    "serverBootId": authorized.server_boot_id,
-                })
-            })
-        }
+        pragma_core::tabs::TabsRequest::StartRun { run_id } => handle_start_run(registry, &run_id),
         pragma_core::tabs::TabsRequest::FinishRun {
             run_id,
             exit_code,
             server_boot_id,
-        } => registry
-            .handle_finish_run(&run_id, exit_code, server_boot_id.as_deref())
-            .and(Ok(serde_json::json!({ "ok": true }))),
+        } => handle_finish_run(registry, &run_id, exit_code, server_boot_id.as_deref()),
+        pragma_core::tabs::TabsRequest::FailRun {
+            run_id,
+            reason,
+            server_boot_id,
+        } => handle_fail_run(registry, &run_id, &reason, server_boot_id.as_deref()),
     };
     Ok(match result {
         Ok(payload) => RpcResponseFrame {
@@ -845,6 +835,38 @@ fn handle_tabs_rpc(
                 details: None,
             }),
         },
+    })
+}
+
+fn handle_fail_run(
+    registry: &Registry,
+    run_id: &str,
+    reason: &str,
+    server_boot_id: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    registry
+        .handle_fail_run(run_id, reason, server_boot_id)
+        .map(|()| serde_json::json!({ "ok": true }))
+}
+
+fn handle_finish_run(
+    registry: &Registry,
+    run_id: &str,
+    exit_code: Option<i32>,
+    server_boot_id: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    registry
+        .handle_finish_run(run_id, exit_code, server_boot_id)
+        .map(|()| serde_json::json!({ "ok": true }))
+}
+
+fn handle_start_run(registry: &Registry, run_id: &str) -> Result<serde_json::Value, String> {
+    registry.handle_start_run(run_id).map(|authorized| {
+        serde_json::json!({
+            "ok": true,
+            "env": authorized.env,
+            "serverBootId": authorized.server_boot_id,
+        })
     })
 }
 
