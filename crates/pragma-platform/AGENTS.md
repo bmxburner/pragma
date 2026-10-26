@@ -91,6 +91,13 @@ CREATE_NO_WINDOW`), used for children that must outlive the app — the server s
 from this process's process group. A short-lived query must not do that, and
 `DETACHED_PROCESS` must never be added (it makes Windows ignore `CREATE_NO_WINDOW`).
 
+**A resolved `.cmd`/`.bat` runs through `cmd.exe /C`.** `npm`, `npx`, and the agent CLIs
+installed from npm are batch shims on Windows, and `CreateProcess` cannot start one — it
+only creates PE images. `process::command` wraps them; pass it the _resolved_ path (see
+`pragma_core::process_env::command`), never a bare name, or the resolver hands back the
+extensionless POSIX script npm writes beside the shim. That combination is what made the
+official plugin installer report "npm not found" on Windows.
+
 ### `ipc` — why `AF_UNIX` and not named pipes
 
 Windows named pipes have **no read timeout and no socket-style `shutdown`**. This codebase
