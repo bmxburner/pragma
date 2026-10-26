@@ -310,6 +310,25 @@ not be reparented as orphans. As a second line of defense, long-lived Bun hosts 
 supervisor stdin EOF as a cleanup-and-exit signal. The client never unlinks `server.lock`;
 the kernel releasing its advisory lock is what makes replacement safe.
 
+## Session environment
+
+A session inherits the server's environment with `PATH` prefixed by the directory
+holding `pragma-cli`, and `PRAGMA_CLI` naming that helper. Agents and terminal users
+resolve `pragma-cli` from it, so losing it silently breaks every plugin's status
+reporting.
+
+- The desktop hands us the helper's absolute path as **`PRAGMA_CLI_PATH`** when it
+  spawns the server — it installed the file, so it is the only authority. Prefer
+  that; `pragma_cli_path()` falls back to `PRAGMA_SERVER_CHANNEL` +
+  `PRAGMA_APP_DATA_DIR` / home for hosts that spawn the server another way (relay,
+  SSH).
+- Derive home through `pragma_core::process_env::home_dir()`, never a literal
+  `std::env::var("HOME")`: a GUI-launched Windows process has `USERPROFILE` and no
+  `HOME`, so the literal lookup dropped `~/.local/bin` from every Windows session
+  and `pragma-cli` was "not recognized".
+- Name the helper with `sidecar::executable_name("pragma-cli")`; the suffix-less
+  path does not exist on Windows.
+
 ## Wire Protocol
 
 Terminal output is raw bytes end-to-end. Every frame is:

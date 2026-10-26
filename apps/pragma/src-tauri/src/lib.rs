@@ -1322,16 +1322,22 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let channel = pty::instance_channel(app.config().product_name.as_deref());
     let data_dir = pty::instance_data_dir(&app_data_dir, &channel);
     std::fs::create_dir_all(&data_dir)?;
-    if let Err(error) = agent_cli::ensure_installed(app.handle(), &data_dir, &channel) {
-        log::warn!("failed to install pragma-cli: {error}");
-    }
+    // Where the helper ended up, so the server can put it on every session's
+    // `PATH` instead of re-deriving the install layout (Windows has no `HOME`).
+    let cli_path = match agent_cli::ensure_installed(app.handle(), &data_dir, &channel) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            log::warn!("failed to install pragma-cli: {error}");
+            None
+        }
+    };
     let router = RouterDb::open(data_dir.join("router.db"))?;
     app.manage(Db::open(data_dir.join("pragma.db"))?);
     let tokens = github::TokenStore::new(&data_dir);
     app.manage(tokens.clone());
     app.manage(system1::System1KeyStore::new(&data_dir));
     let resource_dir = app.path().resource_dir().ok();
-    let pty = PtyClient::new(app_data_dir, channel, resource_dir);
+    let pty = PtyClient::new(app_data_dir, channel, resource_dir, cli_path);
     // The local client stays managed for host-agnostic consumers (agent event
     // bridge, server restart/logs); `Hosts` owns the project → host routing and
     // the per-host clients, and is what the worktree/session commands resolve.
