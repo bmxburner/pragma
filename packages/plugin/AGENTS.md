@@ -14,6 +14,7 @@ packages/plugin/
 ├── src/agent.ts         # defineAgent and agent types
 ├── src/watcher.ts       # defineWatcher and watcher context types
 ├── src/context.ts       # defineContextProvider + `@` picker query/match/prompt-format helpers
+├── src/suggestions.ts   # defineSuggestedDraftProvider + agent-board suggestion types
 ├── src/contributions.ts # UI slot, Settings page, web view, and command contribution helpers
 ├── src/accounts.ts      # defineAccounts, ACCOUNT_PROVIDERS, legacy-usage adapter (resolveAccountProviders)
 ├── src/account-identity.ts # Canonical identity per well-known provider + credential-store readers
@@ -86,6 +87,14 @@ packages/plugin/
   the `<context>` block format — never re-implement them in a client. They are pure, so they
   are also exported from `./catalog`, the bridge-free entry the desktop imports values from
   (the main entry throws without `__PRAGMA__`, which breaks jsdom tests).
+- **Suggested drafts are the board-side sibling of `@` context.** `defineSuggestedDraftProvider`
+  declares `suggest` → drafts (`branchName` + `prompt`, optional `title`/`description`/
+  `agentId`). The desktop merges plugin providers after its built-in GitHub-issues provider
+  (`apps/pragma/src/lib/builtin-suggested-drafts.ts`) and renders them as ghost cards in the
+  agent board's Drafts column; picking one only pre-fills the draft dialog. A provider shows
+  a message instead of cards by throwing `SuggestedDraftProviderNotice` (checked by name via
+  `isSuggestedDraftProviderNotice`, same reason as the context notice). `SUGGESTED_DRAFT_PAGE_SIZE`
+  is the board's page size. Both value exports live in `./catalog` too.
 - Add exported API with JSDoc and tests. Breaking API changes require a major version bump;
   additive changes require a minor bump.
 

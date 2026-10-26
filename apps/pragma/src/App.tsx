@@ -36,11 +36,11 @@ function App() {
               <ThemeProvider>
                 <PluginProvider>
                   <OpenPortsProvider>
-                    <KanbanProvider>
-                      <AutomationsProvider>
-                        <ConfirmCloseProvider>
-                          <WorktreeCreationProvider>
-                            <FanoutsProvider>
+                    <FanoutsProvider>
+                      <KanbanProvider>
+                        <AutomationsProvider>
+                          <ConfirmCloseProvider>
+                            <WorktreeCreationProvider>
                               <UpdatesProvider>
                                 <WorkspaceShell />
                                 <OnboardingModal />
@@ -50,11 +50,11 @@ function App() {
                                 <StorageReminderWatcher />
                                 <SessionRestoreDialog />
                               </UpdatesProvider>
-                            </FanoutsProvider>
-                          </WorktreeCreationProvider>
-                        </ConfirmCloseProvider>
-                      </AutomationsProvider>
-                    </KanbanProvider>
+                            </WorktreeCreationProvider>
+                          </ConfirmCloseProvider>
+                        </AutomationsProvider>
+                      </KanbanProvider>
+                    </FanoutsProvider>
                   </OpenPortsProvider>
                 </PluginProvider>
               </ThemeProvider>

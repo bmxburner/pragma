@@ -49,6 +49,7 @@ describe("Codex launch options", () => {
       ),
     ).toEqual([
       "codex",
+      "--no-daemon",
       "resume",
       "11111111-2222-3333-4444-555555555555",
       "--enable",
@@ -68,6 +69,7 @@ describe("Codex launch options", () => {
       ),
     ).toEqual([
       "codex",
+      "--no-daemon",
       "resume",
       "s",
       "--enable",
@@ -77,7 +79,14 @@ describe("Codex launch options", () => {
     ]);
     expect(
       await agent.launch.resume!({ harnessSessionId: "s", selection: {}, cwd: "/repo" }, emptyHost),
-    ).toEqual(["codex", "resume", "s", "--enable", "default_mode_request_user_input"]);
+    ).toEqual([
+      "codex",
+      "--no-daemon",
+      "resume",
+      "s",
+      "--enable",
+      "default_mode_request_user_input",
+    ]);
   });
 
   it("reads the skills Codex resolved and invokes them with $", () => {

@@ -6,6 +6,9 @@ import { AnimatePresence } from "motion/react";
 import type { KanbanPromptCard } from "@pragma-sh/constants";
 
 import { AgentModelSelector } from "@/components/agents/AgentModelSelector";
+import { FanoutRows, newFanoutRow, type FanoutRow } from "@/components/dialogs/FanoutRows";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import type { BoardAttempt } from "@/lib/kanban-model";
 import { promptCaretPopover } from "@/components/agents/PromptContextMenu";
 import { MarkdownEditor, type MarkdownEditorHandle } from "@/components/github/MarkdownEditor";
 import { Button } from "@/components/ui/button";
@@ -36,11 +39,20 @@ import { listPluginAgents } from "@/plugins/agents";
 import { useKanban } from "@/state/kanban-context";
 import { useWorkspace } from "@/state/workspace-context";
 
+/** Initial values for a brand-new draft, e.g. from a plugin's suggestion. */
+export interface KanbanDraftSeed {
+  branchName: string;
+  prompt: string;
+  agentId?: string | null;
+}
+
 interface KanbanDraftDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** The draft card to edit; null creates a new draft. */
   card: KanbanPromptCard | null;
+  /** Seeds a new draft (ignored when editing a card). */
+  seed?: KanbanDraftSeed | null;
 }
 
 /** Structural subset shared by the DOM and React keyboard events the form emits. */
@@ -86,6 +98,17 @@ function seedNewDraft(apply: DraftSetters): void {
   apply.setError(null);
 }
 
+/** Seed a new draft from a suggestion (branch, prompt, and preferred agent). */
+function seedFromSuggestion(seed: KanbanDraftSeed, apply: DraftSetters): void {
+  apply.setBranch(seed.branchName);
+  apply.setPrompt(seed.prompt);
+  apply.setAgentId(seed.agentId ?? null);
+  // Null marks the agent as unset so the model list resolves its default.
+  apply.setPreviousAgent(null);
+  apply.setModelSelection(EMPTY_MODEL_SELECTION);
+  apply.setError(null);
+}
+
 /** True for a plain or modifier Enter (⌘/Ctrl) without Shift/Alt. */
 function isModEnter(event: SubmitKeyEvent): boolean {
   return (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey;
@@ -107,20 +130,22 @@ function useDraftAgents(open: boolean, setAgents: (agents: AgentConfig[]) => voi
   }, [open, setAgents]);
 }
 
-/** Seed the form from the edited card (or empty for a new draft) when opened. */
+/** Seed the form from the edited card, a suggestion, or empty for a new draft. */
 function useDraftSeed(
   open: boolean,
   card: KanbanPromptCard | null,
+  seed: KanbanDraftSeed | null | undefined,
   wasOpenRef: RefObject<boolean>,
   apply: DraftSetters,
 ) {
   useEffect(() => {
     if (open && !wasOpenRef.current) {
       if (card) seedFromCard(card, apply);
+      else if (seed) seedFromSuggestion(seed, apply);
       else seedNewDraft(apply);
     }
     wasOpenRef.current = open;
-  }, [open, card, apply, wasOpenRef]);
+  }, [open, card, seed, apply, wasOpenRef]);
 }
 
 /** Keep a valid agent selected, falling back to the first (default) agent. */
@@ -294,6 +319,7 @@ function useDraftFormState() {
 }
 
 interface DraftHandlersContext {
+  attempts: BoardAttempt[];
   card: KanbanPromptCard | null;
   agentId: string | null;
   branch: string;
@@ -323,6 +349,7 @@ function useDraftHandlers(ctx: DraftHandlersContext) {
     modelSelection,
     card,
     attachContext,
+    attempts,
   } = ctx;
   const handleAgentChange = useCallback(
     (nextAgentId: string, nextSelection: AgentModelSelection) => {
@@ -344,6 +371,7 @@ function useDraftHandlers(ctx: DraftHandlersContext) {
         agentId,
         modelId: modelSelection.modelId,
         reasoningId: modelSelection.reasoningId,
+        attempts,
       };
       if (card) {
         await kanban.updateCardDraft(card, input);
@@ -367,6 +395,7 @@ function useDraftHandlers(ctx: DraftHandlersContext) {
     setBusy,
     setError,
     attachContext,
+    attempts,
   ]);
   const discard = useCallback(async () => {
     if (!card) {
@@ -389,10 +418,27 @@ function useDraftHandlers(ctx: DraftHandlersContext) {
 
 /** Owns all draft-form state, effects, and handlers. */
 // fallow-ignore-next-line complexity -- composes draft state, model syncing, prompt context, and submit handlers.
-function useKanbanDraftForm({ open, card, onOpenChange }: KanbanDraftDialogProps) {
+function useKanbanDraftForm({ open, card, onOpenChange, seed }: KanbanDraftDialogProps) {
   const kanban = useKanban();
   const workspace = useWorkspace();
   const state = useDraftFormState();
+  const [fanoutRows, setFanoutRows] = useState<FanoutRow[]>([]);
+  const [fanoutMode, setFanoutMode] = useState(false);
+  const preferencesRef = useRef(kanban.preferences);
+  preferencesRef.current = kanban.preferences;
+  useEffect(() => {
+    if (!open || kanban.preferencesLoading) return;
+    const attempts = card ? (preferencesRef.current.attempts[card.id] ?? []) : [];
+    setFanoutMode(attempts.length > 0);
+    setFanoutRows(
+      attempts.map((attempt) =>
+        newFanoutRow(attempt.selector, {
+          modelId: attempt.modelId,
+          reasoningId: attempt.reasoningId,
+        }),
+      ),
+    );
+  }, [open, card, kanban.preferencesLoading]);
   const editorRef = useRef<MarkdownEditorHandle | null>(null);
   const context = useDraftPromptContext(open, workspace, state.branch, editorRef);
   const { seedPrompt } = context;
@@ -430,7 +476,7 @@ function useKanbanDraftForm({ open, card, onOpenChange }: KanbanDraftDialogProps
 
   useDraftAgents(open, state.setAgents);
   useDraftPrimeModels(state.agents, state.primeFromCache);
-  useDraftSeed(open, card, state.wasOpenRef, apply);
+  useDraftSeed(open, card, seed, state.wasOpenRef, apply);
   useDraftAgentFallback(open, state.agents, state.setAgentId);
   useDraftModelSync(
     open,
@@ -440,7 +486,15 @@ function useKanbanDraftForm({ open, card, onOpenChange }: KanbanDraftDialogProps
     state.setModelSelection,
   );
 
-  const canSubmit = state.branch.trim().length > 0 && Boolean(state.agentId) && !state.busy;
+  const canSubmit =
+    state.branch.trim().length > 0 &&
+    Boolean(state.agentId) &&
+    !state.busy &&
+    !kanban.preferencesLoading &&
+    (!fanoutMode ||
+      (state.prompt.trim().length > 0 &&
+        fanoutRows.length >= 2 &&
+        fanoutRows.every((row) => row.agentId)));
   const handlers = useDraftHandlers({
     agentId: state.agentId,
     branch: state.branch,
@@ -454,6 +508,14 @@ function useKanbanDraftForm({ open, card, onOpenChange }: KanbanDraftDialogProps
     setError: state.setError,
     setModelSelection: state.setModelSelection,
     attachContext: context.attachContext,
+    attempts: fanoutMode
+      ? fanoutRows.map((row) => ({
+          key: row.key,
+          selector: row.agentId ?? "",
+          modelId: row.selection.modelId,
+          reasoningId: row.selection.reasoningId,
+        }))
+      : [],
   });
   return {
     agents: state.agents,
@@ -471,6 +533,10 @@ function useKanbanDraftForm({ open, card, onOpenChange }: KanbanDraftDialogProps
     branchOptions,
     context,
     editorRef,
+    fanoutRows,
+    setFanoutRows,
+    fanoutMode,
+    setFanoutMode,
     ...handlers,
   };
 }
@@ -496,14 +562,83 @@ function useDraftPromptContext(
   return usePromptContext({ isOpen: open, project: workspace.activeProject, worktree, editor });
 }
 
+type DraftForm = ReturnType<typeof useKanbanDraftForm>;
+
+/** Switches between one agent and a fanout, seeding two attempts on first switch. */
+function DraftModeTabs({ form }: { form: DraftForm }) {
+  return (
+    <Tabs
+      value={form.fanoutMode ? "fanout" : "single"}
+      onValueChange={(value) => {
+        form.setFanoutMode(value === "fanout");
+        if (value === "fanout" && !form.fanoutRows.length)
+          form.setFanoutRows([
+            newFanoutRow(form.agentId, form.modelSelection),
+            newFanoutRow(form.agentId, form.modelSelection),
+          ]);
+      }}
+    >
+      <TabsList>
+        <TabsTrigger value="single">Single agent</TabsTrigger>
+        <TabsTrigger value="fanout">Fan out</TabsTrigger>
+      </TabsList>
+    </Tabs>
+  );
+}
+
+/** Discard (when editing), Cancel, and the submit button with its shortcut hint. */
+function DraftActions({
+  form,
+  editing,
+  canSubmit,
+  onCancel,
+}: {
+  form: DraftForm;
+  editing: boolean;
+  canSubmit: boolean;
+  onCancel: () => void;
+}) {
+  const submitShortcut = isMacPlatform() ? "⌘↵" : "Ctrl+↵";
+  return (
+    <div className="flex justify-between gap-2">
+      <div>
+        {editing ? (
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={form.busy}
+            onClick={() => void form.discard()}
+          >
+            Discard
+          </Button>
+        ) : null}
+      </div>
+      <div className="flex gap-2">
+        <Button type="button" variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button type="submit" disabled={!canSubmit}>
+          {editing ? "Save draft" : "Add draft"}
+          <span className="ml-2 text-xs opacity-70">{submitShortcut}</span>
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /**
  * Creates or edits a Kanban draft card. The user writes a markdown prompt, picks
  * an agent/model, and selects an existing project worktree branch or types a new
  * one (a shadcn command combobox). Editing an existing draft also offers
  * Discard, which deletes the card.
  */
-export function KanbanDraftDialog({ open: isOpen, onOpenChange, card }: KanbanDraftDialogProps) {
-  const form = useKanbanDraftForm({ open: isOpen, onOpenChange, card });
+export function KanbanDraftDialog({
+  open: isOpen,
+  onOpenChange,
+  card,
+  seed,
+}: KanbanDraftDialogProps) {
+  const form = useKanbanDraftForm({ open: isOpen, onOpenChange, card, seed });
   const autoTarget = useAutoTarget(form.prompt);
   const auto = useAutoSubmit(form.submit);
   const canSubmit = form.canSubmit && !auto.resolving;
@@ -513,7 +648,6 @@ export function KanbanDraftDialog({ open: isOpen, onOpenChange, card }: KanbanDr
     form.context.handleKeyDown(event);
     if (!event.defaultPrevented) handleKeyDown(event);
   };
-  const submitShortcut = isMacPlatform() ? "⌘↵" : "Ctrl+↵";
   useEscapeClosesPickerFirst(isOpen, [form.context], () => onOpenChange(false));
 
   return (
@@ -534,6 +668,7 @@ export function KanbanDraftDialog({ open: isOpen, onOpenChange, card }: KanbanDr
               if (canSubmit) void auto.submit();
             }}
           >
+            <DraftModeTabs form={form} />
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-2">
                 <Label htmlFor="kanban-branch">Branch</Label>
@@ -544,19 +679,38 @@ export function KanbanDraftDialog({ open: isOpen, onOpenChange, card }: KanbanDr
                   onKeyDown={handleKeyDown}
                 />
               </div>
-              <div className="space-y-2">
-                <Label>Agent</Label>
-                <AgentModelSelector
-                  agents={form.agents}
-                  modelsByAgent={form.modelsByAgent}
-                  value={{ agentId: form.agentId, selection: form.modelSelection }}
-                  onChange={form.handleAgentChange}
-                  onLoadModels={form.loadModels}
-                  autoTarget={autoTarget}
-                  autoRegistry={auto.registry}
-                />
-              </div>
+              {!form.fanoutMode ? (
+                <div className="space-y-2">
+                  <Label>Agent</Label>
+                  <AgentModelSelector
+                    agents={form.agents}
+                    modelsByAgent={form.modelsByAgent}
+                    value={{ agentId: form.agentId, selection: form.modelSelection }}
+                    onChange={form.handleAgentChange}
+                    onLoadModels={form.loadModels}
+                    autoTarget={autoTarget}
+                    autoRegistry={auto.registry}
+                  />
+                </div>
+              ) : null}
             </div>
+            {form.fanoutMode ? (
+              <FanoutRows
+                rows={form.fanoutRows}
+                onChange={form.setFanoutRows}
+                selection={{
+                  agents: form.agents,
+                  modelsByAgent: form.modelsByAgent,
+                  agentId: form.agentId,
+                  modelSelection: form.modelSelection,
+                  selectedAgent: form.agents.find((agent) => agent.id === form.agentId) ?? null,
+                  loadModels: form.loadModels,
+                  handleAgentChange: form.handleAgentChange,
+                }}
+                autoTarget={autoTarget}
+                autoRegistry={auto.registry}
+              />
+            ) : null}
             <div className="space-y-2">
               <Label>Prompt</Label>
               <MarkdownEditor
@@ -571,29 +725,12 @@ export function KanbanDraftDialog({ open: isOpen, onOpenChange, card }: KanbanDr
               />
             </div>
             {form.error ? <p className="text-sm text-destructive">{form.error}</p> : null}
-            <div className="flex justify-between gap-2">
-              <div>
-                {card ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    disabled={form.busy}
-                    onClick={() => void form.discard()}
-                  >
-                    Discard
-                  </Button>
-                ) : null}
-              </div>
-              <div className="flex gap-2">
-                <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
-                  Cancel
-                </Button>
-                <Button type="submit" disabled={!canSubmit}>
-                  {card ? "Save draft" : "Add draft"}
-                  <span className="ml-2 text-xs opacity-70">{submitShortcut}</span>
-                </Button>
-              </div>
-            </div>
+            <DraftActions
+              form={form}
+              editing={Boolean(card)}
+              canSubmit={canSubmit}
+              onCancel={() => onOpenChange(false)}
+            />
           </form>
         </ModalShell>
       ) : null}

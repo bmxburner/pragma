@@ -4,6 +4,8 @@ import { type AgentSelection, useAgentSelection } from "@/hooks/use-agent-select
 import { rememberModelSelection } from "@/lib/agent-model-selection";
 import { createWorktree } from "@/lib/tauri";
 import { useWorkspace } from "@/state/workspace-context";
+import { useKanban } from "@/state/kanban-context";
+import { markBoardFixInProgress } from "@/state/kanban-preferences";
 
 function messageFor(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
@@ -36,8 +38,37 @@ export interface FixLauncher {
   launch: (prompt: string) => Promise<boolean>;
 }
 
+/**
+ * Creates the worktree a fix runs in, branched from `baseWorktreeId`, and loads it
+ * into state so its terminal tab resolves its cwd.
+ */
+async function createFixWorktree(
+  workspace: ReturnType<typeof useWorkspace>,
+  baseWorktreeId: string,
+  branch: string,
+  title: string,
+): Promise<{ projectId: string; worktreeId: string }> {
+  const projectId = workspace.selectedProjectId;
+  if (!projectId) {
+    throw new Error("No project is selected to create a worktree in.");
+  }
+  const trimmedBranch = branch.trim();
+  if (!trimmedBranch) {
+    throw new Error("Enter a branch name for the new worktree.");
+  }
+  const worktree = await createWorktree(
+    projectId,
+    baseWorktreeId,
+    trimmedBranch,
+    title.trim() || undefined,
+  );
+  await workspace.refreshProject(projectId);
+  return { projectId, worktreeId: worktree.id };
+}
+
 export function useFixLauncher(active: boolean, worktreeId: string): FixLauncher {
   const workspace = useWorkspace();
+  const kanban = useKanban();
   const selection = useAgentSelection(active);
   const [enabled, setEnabled] = useState(false);
   const [branch, setBranch] = useState("");
@@ -57,27 +88,13 @@ export function useFixLauncher(active: boolean, worktreeId: string): FixLauncher
     setError(null);
     try {
       rememberModelSelection(agent.id, selection.modelSelection);
-      if (enabled) {
-        const projectId = workspace.selectedProjectId;
-        if (!projectId) {
-          throw new Error("No project is selected to create a worktree in.");
-        }
-        const trimmedBranch = branch.trim();
-        if (!trimmedBranch) {
-          throw new Error("Enter a branch name for the new worktree.");
-        }
-        const worktree = await createWorktree(
-          projectId,
-          worktreeId,
-          trimmedBranch,
-          title.trim() || undefined,
-        );
-        // Load the new worktree into state so its terminal tab resolves its cwd.
-        await workspace.refreshProject(projectId);
-        await workspace.startSession(worktree.id, agent, prompt, selection.modelSelection);
-      } else {
-        await workspace.startSession(worktreeId, agent, prompt, selection.modelSelection);
-      }
+      const target = enabled
+        ? await createFixWorktree(workspace, worktreeId, branch, title)
+        : { projectId: workspace.selectedProjectId, worktreeId };
+      await workspace.startSession(target.worktreeId, agent, prompt, selection.modelSelection, {
+        focus: kanban.mode !== "kanban",
+      });
+      if (target.projectId) await markBoardFixInProgress(target.projectId, target.worktreeId);
       return true;
     } catch (cause) {
       setError(messageFor(cause));

@@ -319,14 +319,6 @@ describe("Pragma opencode plugin", () => {
       runtimeEvent("session.status", { sessionID: "child-1", status: { type: "busy" } }),
     );
     await hooks.event?.(runtimeEvent("session.idle", { sessionID: "child-1" }));
-    await hooks.event?.(
-      runtimeEvent("permission.asked", {
-        id: "child-permission",
-        sessionID: "child-1",
-        type: "bash",
-        metadata: { command: "npm test" },
-      }),
-    );
     await hooks["tool.execute.before"]?.(
       { tool: "bash", sessionID: "child-1", callID: "child-call" },
       { args: { command: "npm test" } },
@@ -336,6 +328,78 @@ describe("Pragma opencode plugin", () => {
 
     await hooks.event?.(sessionIdleEvent());
     expect(reports).toEqual(["started", "stopped"]);
+  });
+
+  it("raises a subagent's permission request and resumes once it is answered", async () => {
+    const { hooks, reports, commands } = testHooks();
+    await hooks.event?.(sessionStatus("busy"));
+    await hooks.event?.(
+      runtimeEvent("session.created", { info: { id: "child-1", parentID: "s1" } }),
+    );
+    await hooks.event?.(
+      runtimeEvent("permission.asked", {
+        id: "child-permission",
+        sessionID: "child-1",
+        type: "bash",
+        metadata: { command: "npm test" },
+      }),
+    );
+    expect(reports).toEqual(["started", "attention:command"]);
+    expect(commands).toEqual(["npm test"]);
+
+    await hooks.event?.(
+      runtimeEvent("permission.replied", {
+        sessionID: "child-1",
+        requestID: "child-permission",
+        reply: "once",
+      }),
+    );
+    expect(reports).toEqual(["started", "attention:command", "started"]);
+  });
+
+  it("raises a subagent's question from the canonical event and clears it on reply", async () => {
+    const { hooks, reports, questions } = testHooks();
+    await hooks.event?.(sessionStatus("busy"));
+    await hooks.event?.(
+      runtimeEvent("session.created", { info: { id: "child-1", parentID: "s1" } }),
+    );
+    await hooks.event?.(
+      runtimeEvent("question.asked", {
+        id: "que_child",
+        sessionID: "child-1",
+        questions: [{ question: "Ship it?", options: [{ label: "Yes" }, { label: "No" }] }],
+      }),
+    );
+    expect(reports).toEqual(["started", "attention:question"]);
+    expect(questions[0]).toMatchObject({ question: "Ship it?", requestId: "que_child" });
+
+    await hooks.event?.(
+      runtimeEvent("question.replied", { sessionID: "child-1", requestID: "que_child" }),
+    );
+    expect(reports).toEqual(["started", "attention:question", "started"]);
+  });
+
+  it("raises a subagent's question from the legacy tool hook", async () => {
+    vi.useFakeTimers();
+    try {
+      const { hooks, reports, questions } = testHooks();
+      await hooks.event?.(sessionStatus("busy"));
+      await hooks.event?.(
+        runtimeEvent("session.created", { info: { id: "child-1", parentID: "s1" } }),
+      );
+      await hooks["tool.execute.before"]?.(
+        { tool: "question", sessionID: "child-1", callID: "c9" },
+        { args: { questions: [{ question: "Which file?", options: [{ label: "a.ts" }] }] } },
+      );
+      await vi.advanceTimersByTimeAsync(60);
+      expect(reports).toEqual(["started", "attention:question"]);
+      expect(questions[0]).toMatchObject({
+        question: "Which file?",
+        requestId: "opencode-question-c9",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps the parent running until all subagents finish and the parent idles", async () => {

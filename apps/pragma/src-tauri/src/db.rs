@@ -1095,19 +1095,6 @@ impl Db {
         self.kanban_card(&card.id)
     }
 
-    /// Moves a card to a new column, updating only its status and `updated_at`.
-    pub fn move_kanban_card(
-        &self,
-        id: &str,
-        status: KanbanPromptStatus,
-    ) -> AppResult<KanbanPromptCard> {
-        self.0.lock()?.execute(
-            "UPDATE kanban_cards SET status = ?2, updated_at = datetime('now') WHERE id = ?1",
-            params![id, kanban_status_as_str(status)],
-        )?;
-        self.kanban_card(id)
-    }
-
     /// Hard-deletes a Kanban card.
     pub fn delete_kanban_card(&self, id: &str) -> AppResult<()> {
         self.0
@@ -2128,12 +2115,12 @@ mod tests {
         assert_eq!(started.status, KanbanPromptStatus::InProgress);
         assert_eq!(started.agent_tab_id.as_deref(), Some("tab-1"));
 
-        // Dedicated move covers the automatic done -> reviewNeeded transition.
-        let moved = db
-            .move_kanban_card(&card.id, KanbanPromptStatus::ReviewNeeded)
-            .expect("move should succeed");
+        // A status-only update covers the automatic done -> reviewNeeded transition.
+        let mut moved = started.clone();
+        moved.status = KanbanPromptStatus::ReviewNeeded;
+        let moved = db.update_kanban_card(&moved).expect("move should succeed");
         assert_eq!(moved.status, KanbanPromptStatus::ReviewNeeded);
-        // Move leaves the previously-set worktree intact.
+        // The move leaves the previously-set worktree intact.
         assert_eq!(moved.worktree_id.as_deref(), Some("wt-1"));
 
         // Completion records the action + PR metadata.

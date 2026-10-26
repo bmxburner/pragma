@@ -135,12 +135,13 @@ export const codexAgentPlugin: PluginDefinition = definePlugin({
       icon: () => null,
       iconPath: "assets/codex.png",
       launch: {
-        command: ["codex", "--enable", "default_mode_request_user_input"],
+        command: ["codex", "--no-daemon", "--enable", "default_mode_request_user_input"],
         // `codex resume <id>` reopens exactly that conversation; the `--enable`
         // flag is kept so a resumed session still offers `request_user_input`.
         // Never the original slash command or prompt.
         resume: ({ harnessSessionId, selection }) => [
           "codex",
+          "--no-daemon",
           "resume",
           harnessSessionId,
           "--enable",

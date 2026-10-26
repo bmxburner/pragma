@@ -15,6 +15,7 @@ import {
 import type { MarkdownEditorHandle } from "@/components/github/MarkdownEditor";
 import { slashMenuKeyAction } from "@/lib/agent-launch-options";
 import { hasMention, unescapeMarkdown } from "@/lib/prompt-context";
+import { useStableProject, useStableWorktree } from "@/lib/stable-context-target";
 import { type ActiveContextProvider, useContextProviders } from "@/plugins/context-providers";
 
 /** Wait after the last keystroke before asking providers to search. */
@@ -231,28 +232,6 @@ function usePromptAttachments(isOpen: boolean) {
   }, []);
 
   return { attached, attachContext, seedPrompt };
-}
-
-function useStableProject(project: PluginProject | null | undefined): PluginProject | null {
-  const id = project?.id;
-  const name = project?.name;
-  const path = project?.path;
-  return useMemo(
-    () =>
-      id !== undefined && name !== undefined && path !== undefined ? { id, name, path } : null,
-    [id, name, path],
-  );
-}
-
-function useStableWorktree(worktree: ContextWorktree | null | undefined): ContextWorktree | null {
-  const id = worktree?.id;
-  const path = worktree?.path;
-  const branch = worktree?.branch;
-  return useMemo(
-    () =>
-      id !== undefined && path !== undefined && branch !== undefined ? { id, path, branch } : null,
-    [id, path, branch],
-  );
 }
 
 /**

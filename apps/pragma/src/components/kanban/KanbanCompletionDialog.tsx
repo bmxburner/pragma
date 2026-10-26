@@ -50,7 +50,7 @@ export function KanbanCompletionDialog({
     onOpenChange(false);
   }
 
-  async function goToWorktree() {
+  async function finish(openWorktree: boolean) {
     if (!card) {
       return;
     }
@@ -58,7 +58,7 @@ export function KanbanCompletionDialog({
     setError(null);
     try {
       const saved = await kanban.runCompletion(card, "manual");
-      kanban.openCardWorktree(saved);
+      if (openWorktree) kanban.openCardWorktree(saved);
       onOpenChange(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -79,6 +79,14 @@ export function KanbanCompletionDialog({
 
           <div className="mt-5 space-y-2">
             <CompletionOption
+              icon={<SquareArrowOutUpRight className="size-4" />}
+              title="Mark completed"
+              description="Keep the worktree and return to the board."
+              running={manualRunning}
+              disabled={manualRunning}
+              onClick={() => void finish(false)}
+            />
+            <CompletionOption
               icon={<GitPullRequestCreate className="size-4" />}
               title="Commit all and open PR"
               description="Commit everything, push the branch, and open a pull request — runs in the background."
@@ -92,7 +100,7 @@ export function KanbanCompletionDialog({
               description="Mark complete and open the worktree in the normal workspace."
               running={manualRunning}
               disabled={manualRunning}
-              onClick={() => void goToWorktree()}
+              onClick={() => void finish(true)}
             />
             <div className="flex justify-end pt-2">
               <Button variant="ghost" disabled={manualRunning} onClick={() => onOpenChange(false)}>

@@ -88,6 +88,17 @@ export {
   matchContextItems,
   splitPromptContext,
 } from "./context";
+export type {
+  SuggestedDraft,
+  SuggestedDraftInput,
+  SuggestedDraftProviderDefinition,
+} from "./suggestions";
+export {
+  SUGGESTED_DRAFT_PAGE_SIZE,
+  SuggestedDraftProviderNotice,
+  defineSuggestedDraftProvider,
+  isSuggestedDraftProviderNotice,
+} from "./suggestions";
 export { PLUGIN_API_VERSION } from "./generated/version";
 export {
   useAgentStatuses,

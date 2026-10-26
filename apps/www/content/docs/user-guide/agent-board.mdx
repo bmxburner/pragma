@@ -7,47 +7,86 @@ description: Turn tasks into cards and take them from prompt to pull request wit
 
 The agent board is a high-level alternative to managing agents through terminal tabs.
 Toggle it with **Board** in the toolbar (Escape exits, the header shows **Exit agent
-board**). The board is **project-scoped** and replaces the center workspace; the sidebar
-stays.
+board**). The board is **project-scoped** and takes over the whole window — the sidebar is
+hidden while it is open, so its four columns own the full frame and the header names the
+current project. Closing the board restores the normal workspace.
 
 ## Columns
 
-| Column            | Meaning                                                       |
-| ----------------- | ------------------------------------------------------------- |
-| **Drafts**        | Prompts written down but not started. "New draft" lives here. |
-| **In progress**   | Cards whose agent session is running.                         |
-| **Review needed** | Cards whose agent reported done and is waiting on a human.    |
-| **Completed**     | Cards finished — optionally with a PR attached.               |
+| Column            | Meaning                                                                         |
+| ----------------- | ------------------------------------------------------------------------------- |
+| **Drafts**        | Prompts written down but not started. "New draft" lives here.                   |
+| **In progress**   | Worktrees with running agents, plus review-fix work awaiting manual completion. |
+| **Review needed** | Idle worktrees waiting for a human, including branches with an open PR.         |
+| **Completed**     | Worktrees you have explicitly moved here.                                       |
 
-Column headers carry counts. Moves the board does not allow are rejected with "That move
-isn't available — use the card's actions to advance it."
+The board includes existing non-main worktrees, even when they were created outside the
+board. Removing a worktree elsewhere in Pragma removes its card too, and **hiding** one
+takes its card off the board until you unhide it (the same rule as the sidebar). Opening a
+PR does not automatically complete its card. Column headers carry counts.
 
 ## Cards
 
 A card shows its **branch name**, its agent icon and model, its prompt (three-line
-clamp), and a live status dot while in progress. Completed cards show a **PR #N** badge,
-**Merged** when the PR lands, or a spinner while the PR is being opened.
+clamp), and agent status. When System 1/Jev progress estimation is configured, the card
+shows the same activity and estimated progress as the sidebar; hover the status icon
+for its details. A **PR #N** badge remains visible while agents work on a PR branch.
 
 - **Drafts** open a draft dialog: edit the markdown prompt, pick agent and model, and
   choose the branch — an existing one, or type a new name and pick `Create {branch}`.
-- **In progress** cards open the card's worktree and session. A "Back to agent board"
-  control returns you.
+- **In progress** cards open a popup listing the worktree's agent terminals. You can
+  interact with the live sessions there. **Open worktree** in the top right opens the
+  regular workspace, with **Back to agent board** to return.
+- **PR cards** in Review needed or Completed open a larger version of the Pull Request
+  sidebar beside the file review, with diffs expanded by default and inline review
+  comments. Clicking a file in the PR sidebar opens that file in the regular workspace.
+- Other idle cards open their regular worktree directly.
+
+## Suggested drafts
+
+Sources you have connected can propose drafts for you. They appear at the bottom of the
+**Drafts** column as dashed ghost cards — for example, one for each open GitHub issue when
+you are signed in to GitHub and the project has a GitHub `origin`. Picking one opens the
+draft dialog **pre-filled** with its branch and prompt; nothing is saved until you submit.
+Dismiss a suggestion with the **×** on its card, and it stays hidden for that project. The
+first 20 suggestions show at once; **Load more** reveals the rest. A suggestion whose branch
+already exists is hidden.
+
+Plugins add their own sources with
+[`defineSuggestedDraftProvider`](/docs/plugins/suggestions).
 
 ## Starting a card
 
-Moving a draft into **In progress** (or **Start** on the card) launches in the
+Moving a draft into **In progress** launches in the
 background: Pragma creates or reuses the worktree — with the same main-behind sync gate
 as the normal dialog — and spawns the agent PTY **without mounting a terminal**. The
 board stays up and usable while the agent works. Open the card later and the full
 scrollback is there.
 
-The in-progress → review-needed transition is **automatic**: it fires when the agent
-reports done.
+Ordinary work returns to **Review needed** once all its agents finish. Launching a
+review-comment fix or the **fix it list** moves that worktree to **In progress** and
+keeps it there after the agent finishes, until you manually move it back. Clicking its
+PR number while it is in progress opens its agent terminals.
+
+## Fan out from a draft
+
+Choose **Fan out** in the prompt dialog to add repeatable agent/model attempt rows.
+Save the draft and move it to In progress to launch the attempts. An unpicked fanout is
+one card with its attempts nested inside; clicking an attempt opens its worktree.
+
+Dragging the fanout to **Completed** opens the full comparison in a popup: live sessions,
+scratchpads, and base-to-attempt file diffs, using the same comparison as the regular
+workspace. Pick an implementation and confirm the cleanup. Pragma merges the winner into
+the coordination parent and removes the attempt worktrees. The card becomes an ordinary
+worktree card, then offers the regular completion choices. File and scratchpad links
+leave the board for the relevant regular worktree, with the return button available.
 
 ## Completing a card
 
-Dragging a card into **Completed** (or using the card's action) opens the completion
-dialog with two choices:
+Dragging a worktree with an existing PR into **Completed** marks it complete immediately.
+For other worktrees, the completion dialog offers:
+
+- **Mark completed** — keeps the worktree and returns to the board.
 
 - **Commit all and open PR** — commits everything with AI-planned commits, pushes the
   branch, drafts the pull request, and runs entirely in the background. The card keeps
@@ -55,7 +94,20 @@ dialog with two choices:
 - **Go to worktree** — marks the card complete and opens the worktree in the normal
   workspace.
 
-Completed cards are read-only; delete one with the hover **Delete card** button.
+You can drag a completed card back to In progress or Review needed. A new ordinary agent
+run also reopens it automatically. Delete a card and its worktree with the hover
+**Delete card** button or its context menu.
+
+## Categories
+
+Right-click a card and choose **Set category**. **Add category…** lets you choose a name
+and color and assigns it to the card. Categories belong to the project; a card has at
+most one category. The delete button beside a category removes it and clears its
+assignments without deleting cards. **No category** clears only the selected card.
+
+Categories, saved draft attempt choices, and manual board-state overrides are retained
+in this desktop's database, including across UI updates. Worktrees, running sessions, and fanout execution
+continue to be owned by the host.
 
 ## Cards and everything else
 

@@ -20,7 +20,6 @@ import type {
   AgentSound,
   AgentSoundList,
   KanbanPromptCard,
-  KanbanPromptStatus,
   KeybindingsConfig,
   Project,
   ProjectIcon,
@@ -937,6 +936,16 @@ export function listKanbanCards(projectId: string): Promise<KanbanPromptCard[]> 
   return invoke<KanbanPromptCard[]>("list_kanban_cards", { projectId });
 }
 
+/** Reads project board metadata as an opaque JSON document, durable across UI updates. */
+export function readKanbanPreferences(projectId: string): Promise<string | null> {
+  return invoke("read_kanban_preferences", { projectId });
+}
+
+/** Persists project board metadata in the desktop database. */
+export function writeKanbanPreferences(projectId: string, value: string): Promise<void> {
+  return invoke("write_kanban_preferences", { projectId, value });
+}
+
 /** Creates a fresh draft card scoped to a project. */
 export function createKanbanCard(
   projectId: string,
@@ -959,11 +968,6 @@ export function createKanbanCard(
 /** Persists every mutable field of a card (draft edits and status transitions). */
 export function updateKanbanCard(card: KanbanPromptCard): Promise<KanbanPromptCard> {
   return invoke<KanbanPromptCard>("update_kanban_card", { card });
-}
-
-/** Moves a card to a different column (status only). */
-export function moveKanbanCard(id: string, status: KanbanPromptStatus): Promise<KanbanPromptCard> {
-  return invoke<KanbanPromptCard>("move_kanban_card", { id, status });
 }
 
 /** Deletes a Kanban card. */

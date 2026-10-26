@@ -335,7 +335,7 @@ function shouldHandleReviewArrowKey(
  * first paint can hit the GitHub/local-diff cache immediately; interval and focus
  * polls revalidate in the background without flashing a loading spinner.
  */
-export function ReviewTab({ tab }: { tab: Tab }) {
+export function ReviewTab({ tab }: { tab: Pick<Tab, "worktreeId" | "prNumber"> }) {
   const { worktreeId, prNumber } = tab;
   const { state, setThreadResolved } = useReviewData(worktreeId, prNumber);
   const { sectionEls, commentTargets, registerSection, registerCommentTarget } =

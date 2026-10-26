@@ -7,7 +7,6 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
-  Settings,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -18,7 +17,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { IconButton } from "@/components/ui/icon-button";
 import { PlusCloseIcon } from "@/components/ui/plus-close-icon";
 import { Separator } from "@/components/ui/separator";
 import { TOUR_ANCHOR } from "@/components/onboarding/WorkspaceTour";
@@ -35,8 +33,6 @@ import { useProjectCycle } from "@/hooks/use-project-cycle";
 import { CREATE_PROJECT_EVENT, mainWorktreeLabel, projectIsGit } from "@/lib/non-git-project";
 import { startWindowDrag } from "@/lib/window-drag";
 import { RenderPluginContribution, usePluginSidebarCards } from "@/plugins/rendering";
-import { useAgentProgressTracking } from "@/state/agent-progress-store";
-import { useKanban } from "@/state/kanban-context";
 import { useLeftSidebar } from "@/state/left-sidebar-context";
 import { useWorkspace } from "@/state/workspace-context";
 import { useWorktreeCreation } from "@/state/worktree-creation-context";
@@ -52,9 +48,6 @@ export function ProjectSidebar() {
   const dialogs = useSidebarDialogs();
   const cycle = useProjectCycle();
   const { collapsed, width, toggleCollapsed, setWidth } = useLeftSidebar();
-  // Mounted here because the sidebar is always rendered (collapsed or not), so
-  // progress keeps up even while the worktree rows are out of view.
-  useAgentProgressTracking();
   // Dragging the handle must track the pointer exactly, so the spring is
   // suppressed for the duration of the drag rather than chasing it a frame behind.
   const panelTransition = useMotionTransition(
@@ -274,7 +267,6 @@ function ExpandedProjectSidebar({
           <div className="min-w-0 flex-1">
             <ProjectSwitcher />
           </div>
-          <SettingsButton />
           <AddMenu
             newWorktreeLabel={newWorktreeLabel}
             worktreeDisabled={!mainWorktreeId}
@@ -284,25 +276,6 @@ function ExpandedProjectSidebar({
         </div>
       </div>
     </>
-  );
-}
-
-/**
- * Opens the full-frame Settings view. The native menu also offers this, but on
- * Linux the in-window menu bar is hidden on several desktops, so Settings needs
- * an affordance that does not depend on it.
- */
-function SettingsButton() {
-  const kanban = useKanban();
-  return (
-    <IconButton
-      label="Settings"
-      size="icon-sm"
-      variant="ghost"
-      onClick={() => kanban.openSettings()}
-    >
-      <Settings />
-    </IconButton>
   );
 }
 

@@ -101,6 +101,8 @@ tasks:
         libpipewire-0.3-dev \
         libgbm-dev \
         libclang-dev \
+        xvfb \
+        xauth \
         build-essential \
         file
       sudo apt-get clean
@@ -204,7 +206,8 @@ tasks:
     # may not be allowed to allocate one.
     env:
       PRAGMA_TEST_PTY: "1"
-    run: cargo test --workspace --all-features
+    # The native menu regression test needs GTK on a display, even headless.
+    run: xvfb-run -a cargo test --workspace --all-features
     timeout: 45m
     runner:
       cpus: 16

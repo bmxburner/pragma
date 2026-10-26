@@ -262,11 +262,13 @@ function ChangedFilesSection({
   prNumber,
   unresolvedByPath,
   workspace,
+  onOpenFile,
 }: {
   changedFiles: ChangedFile[];
   prNumber: number;
   unresolvedByPath: Map<string, number>;
   workspace: ReturnType<typeof useWorkspace>;
+  onOpenFile?: (path: string) => void;
 }) {
   return (
     <section className="flex flex-col gap-1">
@@ -277,6 +279,10 @@ function ChangedFilesSection({
         fileBadge={(file) => <UnresolvedBadge count={unresolvedByPath.get(file.path) ?? 0} />}
         files={changedFiles}
         onOpen={(file) => {
+          if (onOpenFile) {
+            onOpenFile(file.path);
+            return;
+          }
           // Request the scroll first so the review tab (new or already open)
           // jumps to this file once its sections are mounted.
           requestReviewFocus(prNumber, file.path);
@@ -336,6 +342,7 @@ export function ViewPullRequestView({
   worktreeId,
   onChanged,
   merging = false,
+  onOpenFile,
 }: {
   repo: GitHubRepoRef;
   pr: PullRequestSummary;
@@ -343,6 +350,8 @@ export function ViewPullRequestView({
   onChanged: PullRequestChanged;
   /** True while a merge mutation is in flight (shows the "merging" badge). */
   merging?: boolean;
+  /** Optional navigation destination when embedded outside the normal sidebar. */
+  onOpenFile?: (path: string) => void;
 }) {
   const workspace = useWorkspace();
   const { data, error, load, prependComment, removeComment } = usePullRequestData(repo, pr);
@@ -364,6 +373,7 @@ export function ViewPullRequestView({
         prNumber={pr.number}
         unresolvedByPath={unresolvedByPath}
         workspace={workspace}
+        onOpenFile={onOpenFile}
       />
       <CommentBox
         onOptimistic={prependComment}

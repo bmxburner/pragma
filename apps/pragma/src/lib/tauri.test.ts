@@ -54,6 +54,8 @@ import {
   ptySpawnDetached,
   readAutomationSource,
   readFile,
+  readKanbanPreferences,
+  writeKanbanPreferences,
   renameFile,
   renameWorktree,
   restoreAgentSession,
@@ -84,6 +86,17 @@ describe("stream IPC wrappers", () => {
     invokeMock.mockResolvedValueOnce([]);
     expect(await sessionRestoreStatus()).toEqual([]);
     expect(invokeMock).toHaveBeenCalledWith("session_restore_status");
+  });
+  it("persists opaque project board metadata through the centralized adapter", async () => {
+    const value = '{"overrides":{"worktree":"inProgress"}}';
+    invokeMock.mockResolvedValueOnce(value);
+    await expect(readKanbanPreferences("project")).resolves.toBe(value);
+    expect(invokeMock).toHaveBeenCalledWith("read_kanban_preferences", { projectId: "project" });
+    await writeKanbanPreferences("project", value);
+    expect(invokeMock).toHaveBeenCalledWith("write_kanban_preferences", {
+      projectId: "project",
+      value,
+    });
   });
   it("sends home-tab notifications with a nullable project and listens only on this window", async () => {
     await showAgentNotification("Finished", "Home tab", null, "mini-home", "mini-tab");

@@ -21,6 +21,13 @@ bun run rust:clippy    # cargo clippy -D warnings
 bun run rust:test      # cargo test --workspace
 ```
 
+Native menu regression: `cargo test -p pragma --test linux_window_menu` runs on
+the OS main thread without starting Pragma servers or webviews. It is Unix-only (a
+Tauri test binary on Windows aborts at load with `STATUS_ENTRYPOINT_NOT_FOUND`, since
+`tauri-build` embeds the common-controls manifest only into the main exe). On headless
+Linux, use `xvfb-run -a cargo test -p pragma --test linux_window_menu`; Linux CI wraps
+the whole Rust suite in Xvfb so GTK coverage never silently skips.
+
 ## Standards (mirrored across TS & Rust)
 
 - TS: `strict` + `noUncheckedIndexedAccess` + no unused. Rust: clippy `all` +

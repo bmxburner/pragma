@@ -23,13 +23,21 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs"
     },
+    "./v2": {
+      "types": "./dist/v2/index.d.ts",
+      "import": "./dist/v2/index.mjs"
+    },
+    "./v2/tui": {
+      "types": "./dist/v2/tui.d.ts",
+      "import": "./dist/v2/tui.mjs"
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "build": "bun build src/index.ts src/pragma-plugin.ts --outdir dist --format esm --target node --packages bundle && mv dist/index.js dist/index.mjs && mv dist/pragma-plugin.js dist/pragma-plugin.mjs",
+    "build": "bun build src/index.ts src/pragma-plugin.ts src/v2/index.ts src/v2/tui.ts --outdir dist --root src --format esm --target node --packages bundle && mv dist/index.js dist/index.mjs && mv dist/pragma-plugin.js dist/pragma-plugin.mjs && mv dist/v2/index.js dist/v2/index.mjs && mv dist/v2/tui.js dist/v2/tui.mjs && node scripts/stage-v2-package.mjs",
     "prepack": "bun run build",
     "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
     "test": "bun --bun vitest run",
@@ -37,6 +45,7 @@
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.17.8",
+    "@opencode/plugin": "^2.1.1",
     "@pragma-sh/plugin": "workspace:*",
     "@pragma-sh/sdk": "workspace:*",
     "@pragma-sh/watcher-kit": "workspace:*",

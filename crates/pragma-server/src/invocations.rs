@@ -3,7 +3,7 @@
 //! A launch the desktop prepares through `prepareAgentLaunch` — and every
 //! server-owned (headless) launch of an agent whose plugin opted into resume —
 //! is recorded here before it starts, so a crash or a native-update quit can
-//! bring the exact harness conversation back. The record lives in a SQLite
+//! bring the exact harness conversation back. The record lives in a `SQLite`
 //! database beside the server socket (per channel, like every other
 //! host-owned store), in transactions, owner-only.
 //!
@@ -243,8 +243,8 @@ pub fn completions_dir(server_dir: &Path) -> PathBuf {
 
 impl InvocationStore {
     /// Opens (creating or migrating if needed) the store beside the socket.
-    /// The database file is created owner-only before SQLite ever sees it,
-    /// and the SQLite sidecar files are re-restricted because SQLite creates
+    /// The database file is created owner-only before `SQLite` ever sees it,
+    /// and the `SQLite` sidecar files are re-restricted because `SQLite` creates
     /// them itself.
     pub fn open(path: &Path) -> Result<Self, InvocationError> {
         if !path.exists() {
@@ -788,7 +788,7 @@ fn migrate(connection: &Connection) -> Result<(), InvocationError> {
     Ok(())
 }
 
-/// Re-restricts the WAL/SHM sidecars SQLite creates on its own.
+/// Re-restricts the WAL/SHM sidecars `SQLite` creates on its own.
 fn restrict_sidecar_files(database: &Path) {
     for suffix in ["-wal", "-shm"] {
         let candidate = format!("{}{suffix}", database.to_string_lossy());

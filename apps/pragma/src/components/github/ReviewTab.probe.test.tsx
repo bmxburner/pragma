@@ -56,6 +56,7 @@ vi.mock("@/components/github/PullRequestStackCard", () => ({
 }));
 
 // The fix dialogs mount only when open; workspace context is still needed for the open case.
+vi.mock("@/state/kanban-context", () => ({ useKanban: () => ({ mode: "normal" }) }));
 vi.mock("@/state/workspace-context", () => ({
   useWorkspace: () => ({
     selectedProjectId: "p",

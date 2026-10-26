@@ -1,5 +1,5 @@
 //! End-to-end crash/recover regression for the durable agent invocation flow:
-//! prepare → real supervisor → real reporter → SQLite → crash → proactive
+//! prepare → real supervisor → real reporter → `SQLite` → crash → proactive
 //! restore → deliberate exit → close-tab suppression → pid-only SIGKILL →
 //! reported session clear.
 //!
@@ -503,10 +503,10 @@ fn connect(socket: &Path) -> LocalStream {
         match ipc::connect(socket) {
             Ok(stream) => {
                 stream
-                    .set_read_timeout(Some(Duration::from_secs(60)))
+                    .set_read_timeout(Some(Duration::from_mins(1)))
                     .expect("read timeout");
                 stream
-                    .set_write_timeout(Some(Duration::from_secs(60)))
+                    .set_write_timeout(Some(Duration::from_mins(1)))
                     .expect("write timeout");
                 return stream;
             }
@@ -614,7 +614,7 @@ fn write_command(server: &Server, tab_id: &str, command: &[String]) {
     send(server, &frame);
 }
 
-/// One row of the on-disk invocation store, read directly with SQLite.
+/// One row of the on-disk invocation store, read directly with `SQLite`.
 #[derive(Debug, Clone)]
 struct Record {
     invocation_id: String,
@@ -726,7 +726,7 @@ fn wait_for_calls(marker: &Path, count: usize) -> Vec<HarnessCall> {
 
 /// Waits for the plugin catalog to resolve the fake agent.
 fn wait_for_catalog(server: &Server) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         let catalog = rpc(
             server,

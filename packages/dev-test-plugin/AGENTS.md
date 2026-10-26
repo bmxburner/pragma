@@ -40,6 +40,10 @@ and then adapted in place (workspace deps, split modules, tests, AGENTS.md).
   (`defineContextProvider`) offering `@dev-hello` (fixed text asking the agent to
   reply PINEAPPLE) and `@dev-project` (the prompt's project/worktree), for testing
   the prompt `@` picker end to end.
+- **`testSuggestionsProvider`** (`src/test-suggestions.ts`) — a suggested-draft
+  provider (`defineSuggestedDraftProvider`) offering `SUGGESTED_DRAFT_PAGE_SIZE + 5`
+  canned drafts, for testing the agent board's Drafts ghost cards, **Load more**
+  paging, and the pre-filled draft dialog end to end.
 - One `defineCommand` greeting (`pragma-dev-test-plugin.hello`).
 - One `defineCommand` web view opener (`pragma-dev-test-plugin.report.open`).
 
@@ -66,6 +70,8 @@ SDK event async generator). Cover:
 - `src/settings-page.test.tsx` — Settings form forwards all board-draft fields and
   reports the created card through `useNotify`.
 - `src/test-mentions.test.ts` — provider lists both mentions and resolves their text.
+- `src/test-suggestions.test.ts` — the suggested-draft provider returns more than
+  one page, honors `limit`, and names the project/worktree.
 - `src/diagnostics-page.test.tsx` — host state renders and a recorded check
   increments the counter and notifies.
 
