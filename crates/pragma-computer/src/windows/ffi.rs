@@ -12,8 +12,8 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
-    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    AttachThreadInput, GetCurrentProcess, GetCurrentThreadId, OpenProcess, OpenProcessToken,
+    QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationCacheRequest, IUIAutomationElement,
@@ -27,15 +27,16 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+    GetAsyncKeyState, SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
     KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_HWHEEL,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
     MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow, ShowWindow,
-    WindowFromPoint, SW_RESTORE, SW_SHOWNORMAL,
+    BringWindowToTop, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, IsIconic,
+    SetForegroundWindow, ShowWindow, SwitchToThisWindow, WindowFromPoint, SW_RESTORE,
+    SW_SHOWNORMAL,
 };
 
 pub type Element = IUIAutomationElement;
@@ -239,15 +240,46 @@ pub fn foreground_pid() -> Option<u64> {
 pub fn activate(window: u32) -> ComputerResult<()> {
     // SAFETY: Win32 validates borrowed HWNDs. No pointers are dereferenced by Rust.
     unsafe {
-        let _ = ShowWindow(hwnd(window), SW_RESTORE);
-        if !SetForegroundWindow(hwnd(window)).as_bool() {
-            return Err(failure(
-                ComputerErrorCode::TargetChanged,
-                "Windows refused foreground activation",
-            ));
+        let target = hwnd(window);
+        // `SW_RESTORE` also un-maximizes, so only use it for a minimized window.
+        if IsIconic(target).as_bool() {
+            let _ = ShowWindow(target, SW_RESTORE);
+        }
+        if GetForegroundWindow() == target {
+            return Ok(());
+        }
+        if SetForegroundWindow(target).as_bool() {
+            return Ok(());
+        }
+        // A background process may not take the foreground while another app
+        // owns it. Windows allows it when the caller shares the foreground
+        // thread's input queue, so join that queue for the duration of the call.
+        let foreground = GetForegroundWindow();
+        let foreground_thread = GetWindowThreadProcessId(foreground, None);
+        let current_thread = GetCurrentThreadId();
+        let attached = foreground_thread != 0
+            && foreground_thread != current_thread
+            && AttachThreadInput(current_thread, foreground_thread, true).as_bool();
+        let raised = SetForegroundWindow(target).as_bool();
+        let _ = BringWindowToTop(target);
+        let _ = SetFocus(Some(target));
+        if attached {
+            let _ = AttachThreadInput(current_thread, foreground_thread, false);
+        }
+        if raised && GetForegroundWindow() == target {
+            return Ok(());
+        }
+        // Last resort: the shell's own activation path, still honoured by
+        // Windows 11 for launchers and tool windows.
+        SwitchToThisWindow(target, true);
+        if GetForegroundWindow() == target {
+            return Ok(());
         }
     }
-    Ok(())
+    Err(failure(
+        ComputerErrorCode::TargetChanged,
+        "Windows refused foreground activation",
+    ))
 }
 pub fn process_path(pid: u32) -> Option<String> {
     // SAFETY: limited-query process handle is closed on every path; buffer length matches its capacity.

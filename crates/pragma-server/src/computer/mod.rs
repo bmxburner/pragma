@@ -1780,11 +1780,16 @@ fn timeout_for(op: &HelperOp) -> Duration {
     match op {
         HelperOp::InSession { action, .. } => return timeout_for(action),
         HelperOp::Open(request) => {
-            Duration::from_millis(
-                request
-                    .wait_ready_ms
-                    .unwrap_or(CONSTANTS.computer.app_launch_wait_ms.get()),
-            ) + action
+            let wait = request
+                .wait_ready_ms
+                .unwrap_or(CONSTANTS.computer.app_launch_wait_ms.get());
+            // A cold `open` first enumerates the Start-menu catalog to resolve a
+            // packaged app's AUMID, and only then waits for its window. Budget
+            // both, or a slow catalog plus a slow first launch kills a helper
+            // that was about to answer.
+            Duration::from_millis(wait)
+                + Duration::from_millis(CONSTANTS.computer.app_launch_wait_ms.get())
+                + action
         }
         // Text is typed one character (a down and an up, ~16 ms) at a time;
         // give it time proportional to its length.

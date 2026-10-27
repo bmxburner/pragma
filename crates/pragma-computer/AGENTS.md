@@ -133,6 +133,16 @@ and then never touch it — and every app it launched inherited its elevation. R
 when the target is elevated and the helper is not, and say so, since the fix is to relaunch
 Pragma elevated.
 
+**Taking the foreground needs the foreground thread's input queue.** A background helper
+cannot call `SetForegroundWindow` on its own, and a refused activation used to fail the
+first pointer click on an app it had just opened. `activate` restores only a minimized
+window (never `SW_RESTORE` on a maximized one), retries through `AttachThreadInput` against
+the current foreground thread, then falls back to `SwitchToThisWindow`, and verifies
+`GetForegroundWindow` before reporting success. Agents name an app "notepad" while xcap
+names its window after the executable path, so `matches_app` also matches the file stem —
+that is what lets `open` reuse a running window instead of launching another copy and then
+waiting out its launch timeout.
+
 Windows takeover currently detects held keys/buttons, not recent wheel events. Foreground and capture behavior must be exercised on Windows 10/11 with mixed DPI; passing a source cross-check is not that validation.
 
 Session cancellation uses `inSession` and reader-thread `setSessionPaused`. `StopFlag` captures a session epoch when queued: pause/resume invalidates older actions without stopping other sessions. Native event-boundary checks also probe physical input in the target pid; the server turns `userTakeover` into a durable pause. Keep modifier/button releases unconditional when interrupted.

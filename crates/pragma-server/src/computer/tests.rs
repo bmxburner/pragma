@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use pragma_computer::fake::FakeBackend;
+use pragma_computer::protocol::HelperOp;
 use pragma_constants::{ComputerActivityType, ComputerErrorCode};
 use serde_json::{json, Value};
 
@@ -1159,4 +1160,22 @@ fn desktop_pause_or_stop_during_approval_preserves_the_user_outcome() {
             .message
             .contains("Please ask the user"));
     }
+}
+
+/// A cold `open` must outlive both its app-catalog lookup and its window wait.
+/// Budgeting only the window wait let a slow Start-menu catalog push the helper
+/// past the deadline, so the server killed a helper that was still working and
+/// the caller saw `helperUnavailable` after a stray app launch.
+#[test]
+fn open_timeout_covers_the_catalog_and_the_window_wait() {
+    let wait = 5_000_u64;
+    let request = serde_json::from_value(json!({ "app": "notepad", "waitReadyMs": wait })).unwrap();
+    let timeout = super::timeout_for(&HelperOp::Open(request));
+    let budget = wait
+        + pragma_constants::CONSTANTS
+            .computer
+            .app_launch_wait_ms
+            .get()
+        + pragma_constants::CONSTANTS.computer.action_timeout_ms.get();
+    assert!(timeout >= std::time::Duration::from_millis(budget));
 }

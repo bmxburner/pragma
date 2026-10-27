@@ -185,9 +185,16 @@ fn matches_app(app: &ComputerApp, name: &str) -> bool {
     app.id.eq_ignore_ascii_case(name)
         || app.name.eq_ignore_ascii_case(name)
         || app.path.as_ref().is_some_and(|p| {
+            let path = std::path::Path::new(p);
             p.eq_ignore_ascii_case(name)
-                || std::path::Path::new(p)
+                || path
                     .file_name()
+                    .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name))
+                // Agents and the CLI say "notepad", not "Notepad.exe"; matching
+                // the stem is what lets `open` reuse a running window instead of
+                // launching another one (and then timing out on the app catalog).
+                || path
+                    .file_stem()
                     .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name))
         })
 }
@@ -843,4 +850,41 @@ pub(super) fn user_activity(pid: Option<u64>) -> Option<UserActivity> {
         target_frontmost: ffi::foreground_pid() == pid,
         pointer_over_target: ffi::point_pid(&point) == pid,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matches_app;
+    use pragma_constants::ComputerApp;
+
+    fn app(path: &str) -> ComputerApp {
+        ComputerApp {
+            id: format!("app:win:{}", path.to_lowercase()),
+            name: path.to_string(),
+            bundle_id: None,
+            path: Some(path.to_string()),
+            pid: Some(42),
+            running: true,
+            frontmost: false,
+            hidden: None,
+            blocked: None,
+        }
+    }
+
+    /// Agents and the CLI name an app "notepad"; xcap names the window after its
+    /// executable path. Matching only the full file name made `open` launch a
+    /// second copy (and then time out waiting for a window it already had).
+    #[test]
+    fn a_program_name_matches_its_executable_stem() {
+        let notepad = app(r"C:\Program Files\WindowsApps\Microsoft.WindowsNotepad\Notepad.exe");
+        for name in [
+            "notepad",
+            "notepad.exe",
+            "Notepad.EXE",
+            r"C:\Program Files\WindowsApps\Microsoft.WindowsNotepad\Notepad.exe",
+        ] {
+            assert!(matches_app(&notepad, name), "{name}");
+        }
+        assert!(!matches_app(&notepad, "paint"));
+    }
 }
