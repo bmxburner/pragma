@@ -248,7 +248,8 @@ pub fn activate(window: u32) -> ComputerResult<()> {
         if GetForegroundWindow() == target {
             return Ok(());
         }
-        if SetForegroundWindow(target).as_bool() {
+        // A TRUE return does not guarantee the switch happened, so verify.
+        if SetForegroundWindow(target).as_bool() && GetForegroundWindow() == target {
             return Ok(());
         }
         // A background process may not take the foreground while another app
