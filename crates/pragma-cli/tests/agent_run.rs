@@ -43,9 +43,17 @@ struct FakeHost {
 
 impl FakeHost {
     /// Accepts connections until stopped, answering each `startRun` with
-    /// `start` (plus an empty env) and each `finishRun` with `finish`.
+    /// `start` (plus a marker path) and each `finishRun` with `finish`.
     fn start(dir: &Path, start: Reply, finish: Reply) -> Self {
-        Self::start_with_env(dir, start, finish, Vec::new())
+        Self::start_with_env(
+            dir,
+            start,
+            finish,
+            vec![(
+                "PRAGMA_TEST_MARKER".to_string(),
+                dir.join("child.txt").to_string_lossy().into_owned(),
+            )],
+        )
     }
 
     /// Like [`Self::start`], with account env returned by the start reply.
@@ -191,30 +199,32 @@ fn cli(host: &FakeHost) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pragma-cli"));
     command
         .env("PRAGMA_SERVER_SOCKET", &host.socket)
+        .env("PRAGMA_TEST_MARKER", host.socket.with_file_name("child.txt"))
         // Never let the session's own CLI delegation redirect this test.
         .env("PRAGMA_CLI_DELEGATED", "1");
     command
 }
 
-/// A child command that writes a marker file, on every platform.
-fn marker_child(marker: &Path) -> Vec<String> {
-    let marker = marker.to_string_lossy().into_owned();
-    #[cfg(unix)]
-    {
-        vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            format!("echo child-ran > '{marker}'"),
-        ]
-    }
-    #[cfg(windows)]
-    {
-        vec![
-            "cmd".to_string(),
-            "/C".to_string(),
-            format!("echo child-ran > \"{marker}\""),
-        ]
-    }
+/// Run this test binary as the supervised child, avoiding shell-specific quoting.
+fn marker_child() -> Vec<String> {
+    vec![
+        std::env::current_exe()
+            .expect("test executable")
+            .to_string_lossy()
+            .into_owned(),
+        "--exact".to_string(),
+        "supervised_child_fixture".to_string(),
+        "--ignored".to_string(),
+    ]
+}
+
+/// Invoked only as a child by the supervision tests.
+#[test]
+#[ignore = "run only as the supervised child"]
+fn supervised_child_fixture() {
+    let marker = std::env::var_os("PRAGMA_TEST_MARKER").expect("marker path");
+    let contents = std::env::var("PRAGMA_TEST_ACCOUNT").unwrap_or_else(|_| "child-ran".to_string());
+    std::fs::write(marker, contents).expect("write child marker");
 }
 
 fn run_agent_run(host: &FakeHost, run_id: &str, child: &[String]) -> std::process::Output {
@@ -231,7 +241,7 @@ fn an_authorized_run_reports_start_and_finish() {
     let host = FakeHost::start(dir.path(), Reply::Ok, Reply::Ok);
     let marker = dir.path().join("child.txt");
 
-    let output = run_agent_run(&host, "run-1", &marker_child(&marker));
+    let output = run_agent_run(&host, "run-1", &marker_child());
 
     assert!(
         output.status.success(),
@@ -271,24 +281,17 @@ fn the_wrapper_applies_the_authorized_env_to_the_child() {
         dir.path(),
         Reply::Ok,
         Reply::Ok,
-        vec![("PRAGMA_TEST_ACCOUNT".to_string(), "acct-1".to_string())],
+        vec![
+            ("PRAGMA_TEST_ACCOUNT".to_string(), "acct-1".to_string()),
+            (
+                "PRAGMA_TEST_MARKER".to_string(),
+                dir.path().join("env.txt").to_string_lossy().into_owned(),
+            ),
+        ],
     );
     let marker = dir.path().join("env.txt");
-    let marker_arg = marker.to_string_lossy().into_owned();
-    #[cfg(unix)]
-    let child = vec![
-        "sh".to_string(),
-        "-c".to_string(),
-        format!("printf '%s' \"$PRAGMA_TEST_ACCOUNT\" > '{marker_arg}'"),
-    ];
-    #[cfg(windows)]
-    let child = vec![
-        "cmd".to_string(),
-        "/C".to_string(),
-        format!("echo %PRAGMA_TEST_ACCOUNT%> \"{marker_arg}\""),
-    ];
 
-    let output = run_agent_run(&host, "run-1", &child);
+    let output = run_agent_run(&host, "run-1", &marker_child());
 
     assert!(
         output.status.success(),
@@ -343,7 +346,7 @@ fn a_rejected_start_never_runs_the_child() {
     );
     let marker = dir.path().join("child.txt");
 
-    let output = run_agent_run(&host, "run-1", &marker_child(&marker));
+    let output = run_agent_run(&host, "run-1", &marker_child());
 
     assert!(!output.status.success(), "an unauthorized run fails");
     assert!(
@@ -373,7 +376,7 @@ fn a_finish_the_host_never_hears_leaves_a_completion_journal() {
     let host = FakeHost::start(dir.path(), Reply::Ok, Reply::Error("server is restarting"));
     let marker = dir.path().join("child.txt");
 
-    let output = run_agent_run(&host, "run-1", &marker_child(&marker));
+    let output = run_agent_run(&host, "run-1", &marker_child());
 
     assert!(
         output.status.success(),
