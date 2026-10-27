@@ -29,7 +29,8 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 ///
 /// Windows batch shims (`.cmd`/`.bat` — `npm`, `npx`, and the agent CLIs installed
 /// through them) are not PE images, so `CreateProcess` cannot start one. They run
-/// through `cmd.exe /C` instead. Passing the resolved path here rather than a bare
+/// through `cmd.exe` by Rust’s standard library, which quotes the complete command.
+/// Passing the resolved path here rather than a bare
 /// name is what lets a caller use [`pragma_platform::shell::find_on_path`] first.
 ///
 /// `cmd.exe` parses the arguments, so only pass arguments that are safe in a batch
@@ -38,22 +39,9 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 #[must_use]
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let program = program.as_ref();
-    let mut command = if is_batch_shim(program) {
-        let mut command = Command::new("cmd.exe");
-        command.arg("/C").arg(program);
-        command
-    } else {
-        Command::new(program)
-    };
+    let mut command = Command::new(program);
     hide_console(&mut command);
     command
-}
-
-fn is_batch_shim(program: &std::ffi::OsStr) -> bool {
-    cfg!(windows)
-        && Path::new(program).extension().is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
-        })
 }
 
 /// Suppresses the console window Windows gives a console program spawned from
@@ -416,12 +404,30 @@ fn parse_tasklist_image_name(output: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::path::Path;
 
     use super::{
-        is_batch_shim, is_running, list_processes, matching_process_roots,
-        parse_tasklist_image_name, process_name, ProcessEntry,
+        is_running, list_processes, matching_process_roots, parse_tasklist_image_name,
+        process_name, ProcessEntry,
     };
+
+    #[cfg(windows)]
+    #[test]
+    fn batch_shim_accepts_spaced_program_and_argument() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let spaced = dir.path().join("Program Files");
+        std::fs::create_dir(&spaced).expect("directory");
+        let script = spaced.join("test shim.cmd");
+        std::fs::write(&script, "@echo off\r\necho %~1\r\n").expect("script");
+        let output = super::command(&script)
+            .arg("C:\\Users\\Jane Doe")
+            .output()
+            .expect("batch output");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "C:\\Users\\Jane Doe"
+        );
+    }
 
     #[test]
     fn the_host_process_table_includes_this_process() {
@@ -517,21 +523,5 @@ mod tests {
     #[test]
     fn an_empty_tasklist_response_yields_nothing() {
         assert_eq!(parse_tasklist_image_name(""), None);
-    }
-
-    /// Only Windows needs (and can use) the `cmd.exe /C` wrapper, and only for
-    /// batch files — an `.exe` must always be created directly.
-    #[test]
-    fn batch_shims_are_recognized_only_on_windows() {
-        assert_eq!(
-            is_batch_shim(Path::new("npm.cmd").as_os_str()),
-            cfg!(windows)
-        );
-        assert_eq!(
-            is_batch_shim(Path::new("npm.bat").as_os_str()),
-            cfg!(windows)
-        );
-        assert!(!is_batch_shim(Path::new("npm.exe").as_os_str()));
-        assert!(!is_batch_shim(Path::new("npm").as_os_str()));
     }
 }

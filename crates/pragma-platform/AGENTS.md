@@ -93,7 +93,7 @@ from this process's process group. A short-lived query must not do that, and
 
 **A resolved `.cmd`/`.bat` runs through `cmd.exe /C`.** `npm`, `npx`, and the agent CLIs
 installed from npm are batch shims on Windows, and `CreateProcess` cannot start one — it
-only creates PE images. `process::command` wraps them; pass it the _resolved_ path (see
+only creates PE images. Rust’s `Command` invokes `cmd.exe` and quotes its command line; pass it the _resolved_ path (see
 `pragma_core::process_env::command`), never a bare name, or the resolver hands back the
 extensionless POSIX script npm writes beside the shim. That combination is what made the
 official plugin installer report "npm not found" on Windows.

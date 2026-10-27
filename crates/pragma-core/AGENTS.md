@@ -67,8 +67,7 @@ Tauri or client presentation code.
 - `process_env::command` **resolves** the program against that augmented `PATH` before
   spawning, and on Windows adds `%APPDATA%\npm`, the WindowsApps aliases, and Scoop shims
   to it — a GUI host does not inherit the `PATH` an interactive shell builds. Resolution
-  is what lets a `.cmd` shim (`npm`) reach `pragma_platform::process::command`, which wraps
-  it in `cmd.exe /C`; `resolve_program` also maps `sh` to Git for Windows' `bash.exe`
+  is what lets a `.cmd` shim (`npm`) reach `pragma_platform::process::command`, which lets Rust launch it through `cmd.exe`; `resolve_program` also maps `sh` to Git for Windows' `bash.exe`
   because the official plugin installers are POSIX scripts and Windows has no `sh`.
 - `GitRequest::CreateWorktree.sourceBranch` materializes an existing `origin` branch
   as a tracking worktree (used by stacked PR layers); without it, creation retains the
