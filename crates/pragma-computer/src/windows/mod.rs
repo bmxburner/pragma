@@ -154,6 +154,29 @@ impl WindowsBackend {
         }
         Ok((app, window))
     }
+    /// A pointer target, with activation attempted but not required.
+    ///
+    /// Windows routes mouse input by the window under the cursor, so a refused
+    /// foreground change must not fail a click: clicking the window is itself
+    /// what brings it forward. Keyboard input still uses [`Self::input_target`].
+    /// The boolean reports whether the target really is foreground, so a caller
+    /// that needs modifiers (which are keyboard events) can refuse.
+    fn pointer_window(
+        app: Option<&str>,
+        pid: Option<u64>,
+    ) -> ComputerResult<(ComputerApp, ComputerWindow, bool)> {
+        let (app, window) = Self::select(app, pid, None)?;
+        ffi::refuse_elevated(u32::try_from(window.pid).unwrap_or_default())?;
+        refuse_minimized(&window)?;
+        let mut foreground = ffi::foreground_pid() == Some(window.pid);
+        if !foreground {
+            if let Some(id) = capture::parse_window_id(&window.id) {
+                let _ = ffi::activate(id);
+            }
+            foreground = ffi::foreground_pid() == Some(window.pid);
+        }
+        Ok((app, window, foreground))
+    }
     fn pointer_target(&mut self, request: &ResolveRequest) -> ComputerResult<Resolved> {
         self.resolve(request)
     }
@@ -636,7 +659,15 @@ impl ComputerBackend for WindowsBackend {
                 "Point is outside the target window",
             ));
         }
-        let (_, window) = Self::input_target(Some(&target.app.id), target.app.pid)?;
+        let (_, window, foreground) = Self::pointer_window(Some(&target.app.id), target.app.pid)?;
+        if !foreground && !request.modifiers.is_empty() {
+            // Modifiers are keyboard events: without the foreground they would
+            // land in whichever app currently owns it.
+            return Err(failure(
+                ComputerErrorCode::TargetChanged,
+                "Target did not become foreground",
+            ));
+        }
         if ffi::point_pid(&point) != Some(window.pid) {
             return Err(failure(
                 ComputerErrorCode::TargetChanged,
@@ -724,7 +755,7 @@ impl ComputerBackend for WindowsBackend {
                 _ => None,
             },
         ))?;
-        let (_, window) = Self::input_target(Some(&target.app.id), target.app.pid)?;
+        let (_, window, _) = Self::pointer_window(Some(&target.app.id), target.app.pid)?;
         let point = target
             .point
             .or_else(|| target.window.as_ref().map(|w| rect_center(&w.frame)))
@@ -763,7 +794,7 @@ impl ComputerBackend for WindowsBackend {
             },
         ))?;
         if request.visual_only != Some(true) {
-            let (_, w) = Self::input_target(Some(&target.app.id), target.app.pid)?;
+            let (_, w, _) = Self::pointer_window(Some(&target.app.id), target.app.pid)?;
             input::move_to(
                 ctx,
                 w.pid,
@@ -809,7 +840,7 @@ impl ComputerBackend for WindowsBackend {
                     )
                 })?
         };
-        let (_, w) = Self::input_target(request.app.as_deref(), request.pid)?;
+        let (_, w, _) = Self::pointer_window(request.app.as_deref(), request.pid)?;
         input::drag(ctx, w.pid, &from, &to, request.duration_ms.unwrap_or(500))?;
         Ok(performed(ComputerMethod::Pointer, true, None))
     }
