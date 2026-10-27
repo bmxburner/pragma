@@ -98,8 +98,7 @@ registers a safe `ctrlc` handler, which wraps `SetConsoleCtrlHandler` and catche
 Ctrl-C and Ctrl-Break. Control handlers are not inherited by children, and `ctrlc` does not
 use the special `SetConsoleCtrlHandler(NULL, TRUE)` ignore flag — that flag **is**
 inherited — so the agent's TUI still receives Ctrl-C. On Unix it registers
-SIGINT/SIGTERM/SIGHUP. The CLI supervisor keeps its own Unix `signal-hook` registration for
-now; the seam is ready for it to adopt there too.
+SIGINT/SIGTERM/SIGHUP through the same platform seam.
 
 The Windows branch is **cross-compiled** (`cargo clippy --target x86_64-pc-windows-gnu`),
 not exercised in a live Windows console. Keeping the wrapper alive is also separate from
@@ -112,6 +111,13 @@ exiting 1 on its own. Neither case is guessed at today. A safe helper in this mo
 expose the control-C status constant for the supervisor to classify (that status is also
 reachable by a program deliberately calling `ExitProcess(0xC000013A)`); a forced code 1
 needs an out-of-band cause from the host, not a platform guess.
+
+**A resolved `.cmd`/`.bat` runs through `cmd.exe /C`.** `npm`, `npx`, and the agent CLIs
+installed from npm are batch shims on Windows, and `CreateProcess` cannot start one — it
+only creates PE images. Rust’s `Command` invokes `cmd.exe` and quotes its command line; pass it the _resolved_ path (see
+`pragma_core::process_env::command`), never a bare name, or the resolver hands back the
+extensionless POSIX script npm writes beside the shim. That combination is what made the
+official plugin installer report "npm not found" on Windows.
 
 ### `ipc` — why `AF_UNIX` and not named pipes
 

@@ -282,6 +282,18 @@ fn run_command(
     cwd: Option<&Path>,
     trailing_path: Option<&Path>,
 ) -> AppResult<String> {
+    if process_env::resolve_program(executable).is_none() {
+        // Name the missing tool and what provides it: "program not found" from the
+        // OS says nothing about which install a Windows user is missing.
+        let hint = match executable {
+            "npm" => "install Node.js, which provides npm, then relaunch Pragma",
+            "sh" => "install Git for Windows, then relaunch Pragma",
+            _ => "install it, then relaunch Pragma",
+        };
+        return Err(AppError::Plugin(format!(
+            "{executable} is not on PATH — {hint}"
+        )));
+    }
     let mut command = process_env::command(executable);
     command.args(args);
     if let Some(path) = trailing_path {
