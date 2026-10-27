@@ -70,21 +70,11 @@ enum ChildExit {
 
 impl ChildExit {
     fn observe(status: std::process::ExitStatus) -> Self {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::ExitStatusExt;
-            if let Some(code) = status.code() {
-                return Self::Code(code);
-            }
-            if let Some(signal) = status.signal() {
-                return Self::Signal(signal);
-            }
+        if let Some(code) = status.code() {
+            return Self::Code(code);
         }
-        #[cfg(not(unix))]
-        {
-            if let Some(code) = status.code() {
-                return Self::Code(code);
-            }
+        if let Some(signal) = pragma_platform::process::exit_signal(&status) {
+            return Self::Signal(signal);
         }
         Self::Unknown
     }

@@ -91,6 +91,7 @@ CREATE_NO_WINDOW`), used for children that must outlive the app — the server s
 from this process's process group. A short-lived query must not do that, and
 `DETACHED_PROCESS` must never be added (it makes Windows ignore `CREATE_NO_WINDOW`).
 
+`process::exit_signal` exposes a Unix child termination signal and returns `None` on Windows.
 `process::survive_terminal_signals` keeps a supervisor alive through terminal cancellation
 so it can report the child's real exit (`pragma-cli agent run` uses it). On Windows it
 registers a safe `ctrlc` handler, which wraps `SetConsoleCtrlHandler` and catches both

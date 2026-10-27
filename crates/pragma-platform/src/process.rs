@@ -103,6 +103,22 @@ pub fn detach(command: &mut Command) {
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Returns the Unix signal that terminated a child, when available.
+/// Windows process exits do not carry a Unix signal.
+#[must_use]
+pub fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal()
+    }
+    #[cfg(windows)]
+    {
+        let _ = status;
+        None
+    }
+}
+
 /// Keeps this process alive through terminal-generated cancellation signals so
 /// a supervisor can observe the child it started.
 ///
