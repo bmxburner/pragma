@@ -20,7 +20,10 @@ use std::process::Command;
 /// process, so each one would otherwise pop a window.
 #[must_use]
 pub fn command(program: &str) -> Command {
-    let mut command = Command::new(program);
+    // Resolve first: on Windows the program may be a `.cmd` shim (`npm`) that
+    // `CreateProcess` cannot start, and `process::command` knows to wrap it.
+    let mut command = resolve_program(program)
+        .map_or_else(|| Command::new(program), pragma_platform::process::command);
     command.env("PATH", user_path());
     pragma_platform::process::hide_console(&mut command);
     command
@@ -30,6 +33,17 @@ pub fn command(program: &str) -> Command {
 #[must_use]
 pub fn find_executable(program: &str) -> Option<PathBuf> {
     pragma_platform::shell::find_on_path_in(program, &user_path())
+}
+
+/// Resolves a program to something this host can actually start.
+///
+/// `sh` is the odd one out on Windows: Pragma's official plugin installers are
+/// POSIX shell scripts, and a typical Windows machine only has the shell that
+/// ships with Git for Windows. Resolve it from `git.exe` rather than a bare `sh`
+/// (which can also be WSL's launcher).
+#[must_use]
+pub fn resolve_program(program: &str) -> Option<PathBuf> {
+    pragma_platform::shell::resolve_program(program, &user_path())
 }
 
 /// Creates a `git` command with optional locks disabled.
@@ -80,6 +94,10 @@ fn user_path_from(current: &OsStr, home: Option<&Path>) -> OsString {
         push_path(&mut entries, home.join(".local/share/mise/shims"));
         push_path(&mut entries, home.join(".asdf/shims"));
         push_path(&mut entries, home.join(".local/share/pnpm"));
+    }
+
+    for path in pragma_platform::shell::user_tool_paths(home) {
+        push_path(&mut entries, path);
     }
 
     for path in [
@@ -181,6 +199,7 @@ mod tests {
         let executable = dir.path().join("agent");
         std::fs::write(&executable, format!("touch {}", marker.display()))
             .expect("seed executable candidate");
+        pragma_platform::perms::set_executable(&executable).expect("executable");
 
         assert_eq!(
             pragma_platform::shell::find_on_path_in("agent", dir.path().as_os_str()),

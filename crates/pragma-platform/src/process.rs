@@ -26,8 +26,19 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 ///
 /// Prefer this over `Command::new` for anything Pragma runs on the user's
 /// behalf. See [`hide_console`] for why.
+///
+/// Windows batch shims (`.cmd`/`.bat` — `npm`, `npx`, and the agent CLIs installed
+/// through them) are not PE images, so `CreateProcess` cannot start one. They run
+/// through `cmd.exe` by Rust’s standard library, which quotes the complete command.
+/// Passing the resolved path here rather than a bare
+/// name is what lets a caller use [`pragma_platform::shell::find_on_path`] first.
+///
+/// `cmd.exe` parses the arguments, so only pass arguments that are safe in a batch
+/// command line (no unquoted `&`, `|`, `>`, `<`, `^`, or `%`). The plugin installer
+/// uses this for validated package specs and paths it owns.
 #[must_use]
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let program = program.as_ref();
     let mut command = Command::new(program);
     hide_console(&mut command);
     command
@@ -398,6 +409,25 @@ mod tests {
         is_running, list_processes, matching_process_roots, parse_tasklist_image_name,
         process_name, ProcessEntry,
     };
+
+    #[cfg(windows)]
+    #[test]
+    fn batch_shim_accepts_spaced_program_and_argument() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let spaced = dir.path().join("Program Files");
+        std::fs::create_dir(&spaced).expect("directory");
+        let script = spaced.join("test shim.cmd");
+        std::fs::write(&script, "@echo off\r\necho %~1\r\n").expect("script");
+        let output = super::command(&script)
+            .arg("C:\\Users\\Jane Doe")
+            .output()
+            .expect("batch output");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "C:\\Users\\Jane Doe"
+        );
+    }
 
     #[test]
     fn the_host_process_table_includes_this_process() {
