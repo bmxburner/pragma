@@ -31,6 +31,10 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 /// through them) are not PE images, so `CreateProcess` cannot start one. They run
 /// through `cmd.exe /C` instead. Passing the resolved path here rather than a bare
 /// name is what lets a caller use [`pragma_platform::shell::find_on_path`] first.
+///
+/// `cmd.exe` parses the arguments, so only pass arguments that are safe in a batch
+/// command line (no unquoted `&`, `|`, `>`, `<`, `^`, or `%`). The plugin installer
+/// uses this for validated package specs and paths it owns.
 #[must_use]
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let program = program.as_ref();

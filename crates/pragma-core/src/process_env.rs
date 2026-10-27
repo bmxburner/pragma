@@ -197,8 +197,6 @@ mod tests {
         assert_eq!(pick(None, None), None);
     }
 
-    /// The user's home directory, however this platform spells it.
-    ///
     /// Windows per-user tool directories are rooted at `USERPROFILE`, so they are
     /// appended on every platform from the same `home` — a GUI-launched host on
     /// Windows does not inherit the `PATH` an interactive shell would build.
