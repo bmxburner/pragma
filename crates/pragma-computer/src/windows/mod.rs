@@ -755,7 +755,9 @@ impl ComputerBackend for WindowsBackend {
                 _ => None,
             },
         ))?;
-        let (_, window, _) = Self::pointer_window(Some(&target.app.id), target.app.pid)?;
+        // The wheel goes to the focused window unless the user has "scroll
+        // inactive windows" on, so a scroll still needs the real foreground.
+        let (_, window) = Self::input_target(Some(&target.app.id), target.app.pid)?;
         let point = target
             .point
             .or_else(|| target.window.as_ref().map(|w| rect_center(&w.frame)))
