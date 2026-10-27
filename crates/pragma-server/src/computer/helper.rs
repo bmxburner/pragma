@@ -266,7 +266,7 @@ impl ProcessHelper {
             .arg(&self.screenshots_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| unavailable(format!("could not start {}: {error}", path.display())))?;
         let stdin = child
@@ -277,6 +277,27 @@ impl ProcessHelper {
             .stdout
             .take()
             .ok_or_else(|| unavailable("helper stdout unavailable"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| unavailable("helper stderr unavailable"))?;
+        // A release helper is built with `panic = "abort"`, so a crash leaves no
+        // trace unless its stderr is drained. Keep the last line to attach to the
+        // failure every waiting call gets, and copy the rest to the server log.
+        let last_error = Arc::new(Mutex::new(None::<String>));
+        let stderr_last = Arc::clone(&last_error);
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let line = line.trim().to_string();
+                if line.is_empty() {
+                    continue;
+                }
+                eprintln!("pragma-computer: {line}");
+                if let Ok(mut slot) = stderr_last.lock() {
+                    *slot = Some(line);
+                }
+            }
+        });
         let mut lines = BufReader::new(stdout).lines();
         let hello = lines
             .next()
@@ -302,13 +323,17 @@ impl ProcessHelper {
                     let _ = waiter.send(response);
                 }
             }
-            // The helper is gone: fail everything still waiting on it.
+            // The helper is gone: fail everything still waiting on it, naming the
+            // last thing it printed (a panic message is the usual case).
+            let detail = last_error
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone())
+                .map_or_else(String::new, |line| format!(": {line}"));
+            let message = format!("the computer-use helper exited{detail}");
             if let Ok(mut pending) = pending.lock() {
                 for (id, waiter) in pending.drain() {
-                    let _ = waiter.send(HelperResponse::err(
-                        id,
-                        unavailable("the computer-use helper exited"),
-                    ));
+                    let _ = waiter.send(HelperResponse::err(id, unavailable(message.clone())));
                 }
             }
         });
