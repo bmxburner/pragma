@@ -349,7 +349,9 @@ fn find_in_path_dir(dir: &Path, name: &str) -> Option<PathBuf> {
             let candidate = dir.join(format!("{name}{extension}"));
             candidate.is_file().then_some(candidate)
         }) {
-            return Some(found);
+            // PATHEXT spelling is uppercase; return the file's own casing so callers
+            // that compare or display the path see what is really on disk.
+            return Some(crate::path::canonicalize(&found).unwrap_or(found));
         }
     }
     let candidate = dir.join(name);
