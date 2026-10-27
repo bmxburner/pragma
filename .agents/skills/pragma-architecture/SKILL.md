@@ -53,7 +53,8 @@ architecture** with **consistent conventions across TypeScript and Rust**.
   status via `@pragma-sh/sdk`. Launchable Pragma agents are `defineAgent` plugin contributions,
   not bundled `pragma/agents` JSON.
   Pragma does **not** bundle, install, or register the plugin — you register its built
-  `dist/index.mjs` absolute path in opencode's own `plugin` config array yourself (opencode does
+  `dist/index.mjs` absolute path in opencode's own `plugin` config array yourself, or
+  the `dist/v2` directory in `plugins` for OpenCode v2 (opencode does
   **not** auto-load plugins from a directory; a file-path array entry is the only thing that loads,
   and the bare unpublished package name must never be registered).
 

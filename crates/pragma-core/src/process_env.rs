@@ -20,7 +20,10 @@ use std::process::Command;
 /// process, so each one would otherwise pop a window.
 #[must_use]
 pub fn command(program: &str) -> Command {
-    let mut command = Command::new(program);
+    // Resolve first: on Windows the program may be a `.cmd` shim (`npm`) that
+    // `CreateProcess` cannot start, and `process::command` knows to wrap it.
+    let mut command = resolve_program(program)
+        .map_or_else(|| Command::new(program), pragma_platform::process::command);
     command.env("PATH", user_path());
     pragma_platform::process::hide_console(&mut command);
     command
@@ -30,6 +33,23 @@ pub fn command(program: &str) -> Command {
 #[must_use]
 pub fn find_executable(program: &str) -> Option<PathBuf> {
     pragma_platform::shell::find_on_path_in(program, &user_path())
+}
+
+/// Resolves a program to something this host can actually start.
+///
+/// `sh` is the odd one out on Windows: Pragma's official plugin installers are
+/// POSIX shell scripts, and a typical Windows machine only has the shell that
+/// ships with Git for Windows. Resolve it from `git.exe` rather than a bare `sh`
+/// (which can also be WSL's launcher).
+#[must_use]
+pub fn resolve_program(program: &str) -> Option<PathBuf> {
+    if let Some(path) = find_executable(program) {
+        return Some(path);
+    }
+    if cfg!(windows) && program == "sh" {
+        return pragma_platform::shell::find_git_bash();
+    }
+    None
 }
 
 /// Creates a `git` command with optional locks disabled.
@@ -80,6 +100,25 @@ fn user_path_from(current: &OsStr, home: Option<&Path>) -> OsString {
         push_path(&mut entries, home.join(".local/share/mise/shims"));
         push_path(&mut entries, home.join(".asdf/shims"));
         push_path(&mut entries, home.join(".local/share/pnpm"));
+
+        if cfg!(windows) {
+            // Windows puts per-user tools somewhere else entirely. A default Node
+            // install writes npm's global shims (`claude.cmd`, `opencode.cmd`, …)
+            // to `%APPDATA%\npm`, and winget/scoop shims live in their own dirs;
+            // none of them are on a GUI-launched host's PATH.
+            push_path(
+                &mut entries,
+                home.join("AppData").join("Roaming").join("npm"),
+            );
+            push_path(
+                &mut entries,
+                home.join("AppData")
+                    .join("Local")
+                    .join("Microsoft")
+                    .join("WindowsApps"),
+            );
+            push_path(&mut entries, home.join("scoop").join("shims"));
+        }
     }
 
     for path in [
@@ -156,6 +195,23 @@ mod tests {
             Some(PathBuf::from(r"C:\Users\dev"))
         );
         assert_eq!(pick(None, None), None);
+    }
+
+    /// The user's home directory, however this platform spells it.
+    ///
+    /// Windows per-user tool directories are rooted at `USERPROFILE`, so they are
+    /// appended on every platform from the same `home` — a GUI-launched host on
+    /// Windows does not inherit the `PATH` an interactive shell would build.
+    #[cfg(windows)]
+    #[test]
+    fn user_path_includes_windows_tool_directories() {
+        let path = user_path_from(
+            &OsString::from(r"C:\Windows\system32"),
+            Some(Path::new(r"C:\Users\dev")),
+        );
+        let entries: Vec<PathBuf> = env::split_paths(&path).collect();
+        assert!(entries.contains(&PathBuf::from(r"C:\Users\dev\AppData\Roaming\npm")));
+        assert!(entries.contains(&PathBuf::from(r"C:\Users\dev\scoop\shims")));
     }
 
     #[test]

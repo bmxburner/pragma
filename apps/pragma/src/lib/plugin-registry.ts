@@ -5,6 +5,9 @@ import { installOfficialPlugin } from "@/lib/tauri";
 const OFFICIAL_LOCK_URL =
   "https://raw.githubusercontent.com/pragma-sh/pragma/main/packages/plugin-registry/official.lock.json";
 
+/** A blocked or captive network must not leave onboarding waiting forever. */
+const OFFICIAL_LOCK_TIMEOUT_MS = 5_000;
+
 interface PluginLock {
   schemaVersion: 1;
   plugins: LockedPlugin[];
@@ -17,15 +20,31 @@ export function bundledOfficialPluginLock(): LockedPlugin[] {
   return validateLock(officialPluginLock);
 }
 
-/** Loads official GitHub lock once, with checked-in release metadata as offline fallback. */
+/**
+ * Loads the official GitHub lock once, with the checked-in release metadata as an
+ * offline fallback. The fetch is bounded: onboarding renders its list from this
+ * promise, so a request that never settles leaves the agent step empty forever.
+ */
 export function loadOfficialPluginLock(): Promise<LockedPlugin[]> {
-  cachedLock ??= fetch(OFFICIAL_LOCK_URL)
-    .then(async (response) => {
-      if (!response.ok) throw new Error(`official plugin lock returned ${response.status}`);
-      return validateLock((await response.json()) as PluginLock);
-    })
+  cachedLock ??= fetchOfficialLock()
+    .then((lock) => validateLock(lock))
     .catch(() => bundledOfficialPluginLock());
   return cachedLock;
+}
+
+async function fetchOfficialLock(): Promise<PluginLock> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), OFFICIAL_LOCK_TIMEOUT_MS);
+  try {
+    const response = await fetch(OFFICIAL_LOCK_URL, {
+      signal: controller.signal,
+      cache: "no-cache",
+    });
+    if (!response.ok) throw new Error(`official plugin lock returned ${response.status}`);
+    return (await response.json()) as PluginLock;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Installs exact release represented by one validated lock entry. */

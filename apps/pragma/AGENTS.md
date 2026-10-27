@@ -523,7 +523,10 @@ Agent pins are cosmetic localStorage state in `state/agent-pins.ts`.
 First-run agent plugin recommendations use the reviewed lock bundled with the app, then
 check agent names against the same GUI-augmented `PATH` used to launch children. Startup
 must not wait for GitHub or execute every candidate CLI with `--version`: either can delay
-the final onboarding step indefinitely.
+the final onboarding step indefinitely. The published-lock fetch is therefore bounded (and
+falls back to the bundled copy), and the probe only resolves names. On Windows that `PATH`
+also carries `%APPDATA%\npm` plus the winget and Scoop shim directories, because a
+GUI-launched app never inherits the `PATH` an interactive shell builds.
 
 Manual terminal launches get a second chance after onboarding: when the submitted command
 matches an official agent without a loaded integration, the desktop offers to install its
@@ -534,7 +537,10 @@ again**.
 
 Both agent-plugin install dialogs close before installation starts. Installation continues
 in the background; success or failure is reported later through a toast, so npm/network or
-host-configuration work never traps the user behind a modal.
+host-configuration work never traps the user behind a modal. On Windows the installer runs
+`npm` through its resolved `npm.cmd` batched by `cmd.exe /C`, and the package's
+`sh scripts/install.sh` step through Git for Windows' `bash.exe` when there is no `sh` on
+`PATH` — a bare `Command::new("npm")` cannot start a batch shim, and `sh` does not exist.
 
 Worktree pins are cosmetic localStorage state in `state/worktree-pins.ts`
 (worktree id → pin timestamp). The sidebar promotes pinned worktrees to roots

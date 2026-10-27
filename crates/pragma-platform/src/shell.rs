@@ -340,18 +340,67 @@ pub fn find_on_path_in(name: &str, path: &OsStr) -> Option<PathBuf> {
 }
 
 fn find_in_path_dir(dir: &Path, name: &str) -> Option<PathBuf> {
-    let candidate = dir.join(name);
-    if candidate.is_file() {
-        return Some(candidate);
+    // npm, bun, and every node CLI ship an extensionless POSIX script *next to*
+    // the shim Windows can actually start. Returning that script first hands
+    // `CreateProcess` (or `cmd.exe`) something it cannot execute, which is how
+    // `npm` looked "not found" on Windows. Try PATHEXT matches first there.
+    if cfg!(windows) && Path::new(name).extension().is_none() {
+        if let Some(found) = path_extensions().split(';').find_map(|extension| {
+            let candidate = dir.join(format!("{name}{extension}"));
+            candidate.is_file().then_some(candidate)
+        }) {
+            // PATHEXT spelling is uppercase; return the file's own casing so callers
+            // that compare or display the path see what is really on disk.
+            return Some(crate::path::canonicalize(&found).unwrap_or(found));
+        }
     }
-    if !cfg!(windows) || Path::new(name).extension().is_some() {
+    let candidate = dir.join(name);
+    candidate.is_file().then_some(candidate)
+}
+
+fn path_extensions() -> String {
+    std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+}
+
+/// The POSIX shell Git for Windows ships, if this machine has one.
+///
+/// Pragma's official plugin installers are `sh scripts/install.sh`, and Windows
+/// has no `sh` on `PATH` by default. Git for Windows is already a prerequisite
+/// (the host runs `git` constantly), and it carries `bin\bash.exe`, so derive the
+/// shell from the resolved `git.exe` instead of guessing at `PATH` — a bare `sh`
+/// can also be the WSL launcher, which sees a different filesystem and `PATH`.
+///
+/// Always `None` off Windows: those hosts have a real `/bin/sh`.
+#[must_use]
+pub fn find_git_bash() -> Option<PathBuf> {
+    if !cfg!(windows) {
         return None;
     }
-    let path_extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
-    path_extensions.split(';').find_map(|extension| {
-        let candidate = dir.join(format!("{name}{extension}"));
-        candidate.is_file().then_some(candidate)
-    })
+    if let Some(git) = find_on_path("git") {
+        if let Some(bash) = bash_near_git(&git) {
+            return Some(bash);
+        }
+    }
+    ["C:\\Program Files\\Git", "C:\\Program Files (x86)\\Git"]
+        .into_iter()
+        .map(|root| Path::new(root).join("bin").join("bash.exe"))
+        .find(|candidate| candidate.is_file())
+}
+
+/// The shell beside a Git for Windows installation, whatever layout it uses.
+fn bash_near_git(git: &Path) -> Option<PathBuf> {
+    let dir = git.parent()?;
+    [
+        Path::new("bash.exe"),           // <git>/bin/git.exe
+        Path::new("../bin/bash.exe"),    // <git>/cmd/git.exe
+        Path::new("../../bin/bash.exe"), // <git>/mingw64/bin/git.exe
+        Path::new("../bin/sh.exe"),
+        Path::new("../../bin/sh.exe"),
+    ]
+    .into_iter()
+    .map(|relative| dir.join(relative))
+    .filter(|candidate| candidate.is_file())
+    .find_map(|candidate| crate::path::canonicalize(candidate).ok())
 }
 
 #[cfg(test)]
@@ -359,8 +408,9 @@ mod tests {
     use pragma_constants::TerminalBackend;
 
     use super::{
-        find_on_path, interactive_command_line, parse_profile, pick_windows_shell, profile_launch,
-        resolve_profile_launch, resolve_shell, ShellLaunch, ShellProfile,
+        bash_near_git, find_on_path, find_on_path_in, interactive_command_line, parse_profile,
+        pick_windows_shell, profile_launch, resolve_profile_launch, resolve_shell, ShellLaunch,
+        ShellProfile,
     };
 
     fn wsl(distro: Option<&str>) -> ShellProfile {
@@ -611,6 +661,40 @@ mod tests {
     #[test]
     fn a_missing_absolute_path_resolves_to_nothing() {
         assert_eq!(find_on_path("/definitely/not/here/pwsh.exe"), None);
+    }
+
+    /// npm and node CLIs ship both an extensionless POSIX script and a Windows
+    /// shim in the same directory. The shim is the only one the OS can start.
+    #[test]
+    fn a_windows_shim_wins_over_an_extensionless_script() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("tool"), b"#!/bin/sh\n").expect("posix script");
+        std::fs::write(dir.path().join("tool.cmd"), b"@echo off\r\n").expect("cmd shim");
+        let found = find_on_path_in("tool", dir.path().as_os_str()).expect("resolved");
+        if cfg!(windows) {
+            assert_eq!(found, dir.path().join("tool.cmd"));
+        } else {
+            assert_eq!(found, dir.path().join("tool"));
+        }
+    }
+
+    /// Git for Windows ships its POSIX shell beside `git.exe`; both the
+    /// `<git>/cmd` and `<git>/mingw64/bin` layouts must resolve.
+    #[test]
+    fn git_bash_is_found_beside_either_git_layout() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        for layout in ["cmd", "mingw64/bin"] {
+            let git_dir = dir.path().join(layout);
+            std::fs::create_dir_all(&git_dir).expect("git dir");
+            std::fs::write(git_dir.join("git.exe"), b"").expect("git");
+            std::fs::create_dir_all(dir.path().join("bin")).expect("bin");
+            std::fs::write(dir.path().join("bin/bash.exe"), b"").expect("bash");
+            assert_eq!(
+                bash_near_git(&git_dir.join("git.exe")),
+                crate::path::canonicalize(dir.path().join("bin/bash.exe")).ok(),
+                "layout {layout}"
+            );
+        }
     }
 
     #[test]
