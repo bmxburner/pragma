@@ -667,6 +667,11 @@ pub enum AgentCommand {
     /// Report an external agent's status to the server. Direct to the server;
     /// the reporting logic is the same as before, only the command path moved.
     Report(AgentReportArgs),
+    /// Supervise one prepared agent invocation, reporting its start and end to
+    /// the host. Written into a tracked launch by
+    /// `pragma-cli agent run --run-id <id> -- <argv…>`; not meant to be run by
+    /// hand.
+    Run(AgentRunArgs),
     /// Report a rich agent message to the server. Direct to the server.
     Message(AgentMessageArgs),
     /// Block until a command-approval verdict arrives for `--request-id`, then
@@ -802,6 +807,17 @@ pub struct AgentReportArgs {
     pub agent: String,
     #[command(subcommand)]
     pub report: AgentReportCommand,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentRunArgs {
+    /// The run id the host prepared this invocation under.
+    #[arg(long = "run-id")]
+    pub run_id: String,
+    /// The literal argv to supervise, after the `--` separator. Runs in this
+    /// same terminal with `PRAGMA_AGENT_RUN_ID` in its environment.
+    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    pub command: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -945,6 +961,23 @@ pub enum AgentReportCommand {
         #[arg(long)]
         name: String,
     },
+    /// Reports the harness's own session id (the opaque conversation id a
+    /// resume continues) without changing the agent's status, or clears it.
+    /// Report again whenever the harness switches conversations, so a restore
+    /// resumes the latest one; clear it when there is no conversation to
+    /// resume (a new, not-yet-materialized session, or the selected one was
+    /// deleted).
+    #[command(name = "session-id")]
+    SessionId {
+        /// The harness's conversation id, verbatim. Mutually exclusive with
+        /// `--clear`; one of the two is required.
+        #[arg(long, conflicts_with = "clear", required_unless_present = "clear")]
+        id: Option<String>,
+        /// Clear the stored conversation id instead of setting one, so nothing
+        /// auto-resumes it. A later launch starts a fresh conversation.
+        #[arg(long, required_unless_present = "id")]
+        clear: bool,
+    },
     /// Clears the tab's indicator entirely instead of leaving a `done`/green dot.
     /// Use when the agent process exits rather than finishing a turn.
     Cleared {
@@ -1023,6 +1056,103 @@ mod tests {
         };
         assert_eq!(agent, "x");
         assert!(matches!(report, AgentReportCommand::Started));
+    }
+
+    #[test]
+    fn agent_run_parses_the_run_id_and_literal_argv() {
+        let cli = Cli::try_parse_from([
+            "pragma-cli",
+            "agent",
+            "run",
+            "--run-id",
+            "run-1",
+            "--",
+            "claude",
+            "--resume",
+            "abc",
+        ])
+        .expect("agent run parses");
+        let TopCommand::Agent {
+            agent: AgentCommand::Run(args),
+        } = cli.command
+        else {
+            panic!("expected agent run");
+        };
+        assert_eq!(args.run_id, "run-1");
+        assert_eq!(args.command, ["claude", "--resume", "abc"]);
+    }
+
+    #[test]
+    fn agent_report_session_id_parses_an_id_or_a_clear() {
+        let cli = Cli::try_parse_from([
+            "pragma-cli",
+            "agent",
+            "report",
+            "--agent",
+            "claude-code",
+            "session-id",
+            "--id",
+            "session-abc",
+        ])
+        .expect("session-id report parses");
+        let TopCommand::Agent {
+            agent: AgentCommand::Report(args),
+        } = cli.command
+        else {
+            panic!("expected agent report");
+        };
+        let AgentReportCommand::SessionId { id, clear } = args.report else {
+            panic!("expected session-id");
+        };
+        assert_eq!(id.as_deref(), Some("session-abc"));
+        assert!(!clear);
+
+        let cli = Cli::try_parse_from([
+            "pragma-cli",
+            "agent",
+            "report",
+            "--agent",
+            "pi",
+            "session-id",
+            "--clear",
+        ])
+        .expect("session-id --clear parses");
+        let TopCommand::Agent {
+            agent: AgentCommand::Report(args),
+        } = cli.command
+        else {
+            panic!("expected agent report");
+        };
+        let AgentReportCommand::SessionId { id, clear } = args.report else {
+            panic!("expected session-id");
+        };
+        assert!(id.is_none());
+        assert!(clear);
+    }
+
+    #[test]
+    fn agent_report_session_id_requires_exactly_one_of_id_or_clear() {
+        assert!(Cli::try_parse_from([
+            "pragma-cli",
+            "agent",
+            "report",
+            "--agent",
+            "pi",
+            "session-id",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "pragma-cli",
+            "agent",
+            "report",
+            "--agent",
+            "pi",
+            "session-id",
+            "--id",
+            "session-abc",
+            "--clear",
+        ])
+        .is_err());
     }
 
     #[test]

@@ -29,8 +29,20 @@ Tauri or client presentation code.
   processes, but still surfaces persistent filesystem and permission failures.
 - **Migrating metadata:** legacy project/worktree/tab rows remain in the client
   DB, but daemon-owned terminal agent metadata now uses the `tabs` RPC so it
-  persists with the host that owns the PTY. Other metadata domains still return
+  persists with the host that owns the PTY. `tabs.rs` also owns the
+  agent-session lifecycle contract the desktop and the CLI speak:
+  `PrepareAgentLaunch` (`{command, runId?, commandLine?}`; the original argv
+  comes back unchanged for an agent that did not opt into resume, and
+  `commandLine` is the argv quoted for the shell the tab actually runs),
+  `RestoreAgentSession`
+  (`{restored}`; an eligible record that cannot resume is an RPC error, never a
+  silent fallback), and the CLI-internal `StartRun`/`FinishRun` run-lifecycle
+  ops. The durable record and its rules live on the host in
+  `crates/pragma-server` (`invocations.rs`, `agent_resume.rs`). Other metadata
+  domains still return
   `UnsupportedMethod` from core — by design (see `pragma-client/router.rs`).
+- `tabs::SessionRestoreSnapshot` is the read-only `sessionRestoreStatus` response:
+  boot-scoped attempted-restore progress and startup-pass completion, not recovery identity.
 - GitHub API/auth and AI are intentionally kept as local sidecars, not core RPC.
   Worktree-scoped git operations that support the GitHub PR flow still belong in the
   `git` RPC, because they must execute on the host that owns the worktree path.

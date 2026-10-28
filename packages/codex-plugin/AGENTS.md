@@ -48,21 +48,56 @@ Official references:
 
 ## Hook to status mapping
 
-| Codex hook                      | Script event     | Pragma behavior                                                               |
-| ------------------------------- | ---------------- | ----------------------------------------------------------------------------- |
-| `SessionStart`                  | `cleared`        | Clears stale status, watcher, and child markers                               |
-| `UserPromptSubmit`              | `started`        | Reports running; first prompt derives `session-name`; starts abort watcher    |
-| `Stop`                          | `stopped`        | Reports done only with an active turn marker and no active children           |
-| `SubagentStart`                 | `subagent-start` | Tracks child by `agent_id`, reasserts running                                 |
-| `SubagentStop`                  | `subagent-stop`  | Removes only matching child; parent `Stop` owns done                          |
-| `PermissionRequest`             | `permission`     | Reports command attention and blocks for finite remote decision               |
-| `PostToolUse`                   | `running`        | Reasserts running after approved tool completes                               |
-| Transcript `request_user_input` | abort watcher    | Reports single-question attention; watcher returns remote answers as TUI keys |
-| Transcript `agent_message`      | abort watcher    | Streams each completed assistant message (raw Markdown) mid-turn              |
+| Codex hook                      | Script event     | Pragma behavior                                                                                                             |
+| ------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `SessionStart`                  | `cleared`        | Reports `session-id` when the conversation changes, then clears stale status, watcher, and child markers                    |
+| `UserPromptSubmit`              | `started`        | Reports `session-id` when the conversation changes, then running; first prompt derives `session-name`; starts abort watcher |
+| `Stop`                          | `stopped`        | Reports done only with an active turn marker and no active children                                                         |
+| `SubagentStart`                 | `subagent-start` | Tracks child by `agent_id`, reasserts running                                                                               |
+| `SubagentStop`                  | `subagent-stop`  | Removes only matching child; parent `Stop` owns done                                                                        |
+| `PermissionRequest`             | `permission`     | Reports command attention and blocks for finite remote decision                                                             |
+| `PostToolUse`                   | `running`        | Reasserts running after approved tool completes                                                                             |
+| Transcript `request_user_input` | abort watcher    | Reports single-question attention; watcher returns remote answers as TUI keys                                               |
+| Transcript `agent_message`      | abort watcher    | Streams each completed assistant message (raw Markdown) mid-turn                                                            |
 
 `SubagentStart` also emits a system message with marker-derived
 `subAgentsActive`. Status reports do not carry that count; without this message,
 chat consumers and `agent verify` cannot observe real parallel activity.
+
+## Session tracking + resume
+
+`SessionStart` and `UserPromptSubmit` carry a required **`session_id`** — Codex's own
+thread UUID, the value `codex resume <id>` accepts. It is **not** `turn_id` (per-turn)
+and it is present on every tested version (`session-start` / `user-prompt-submit`
+generated schemas at `rust-v0.144.4`, `rust-v0.153.4`, and the 0.160.0 parser). The
+bridge reads it in the `cleared` (SessionStart) and `started` branches and reports it
+status-lessly as `session-id --id <id>` only when it changes
+(`$TMPDIR/pragma-cli-codex-$TAB.session-id` remembers the last reported id), so
+startup, `codex resume`, `/new`, and fork report the new conversation even with no
+title and no following prompt; A→B→A reports each switch. The `UserPromptSubmit` call
+also covers a plugin loaded mid-session.
+
+`SubagentStart` / `SubagentStop` payloads also carry `session_id` (the parent thread),
+but those branches never report it, and a `stopped` hook with no live marker exits
+before touching state, so a child or a stale turn cannot take over the tracked
+conversation. `report` swallows failures, so an older installed `pragma-cli` without
+the `session-id` subcommand cannot disrupt status reporting. No "session ended" state
+is reported: `cleared` stays status-only and the host's supervised invocation tracks
+the real process exit separately.
+
+**Resume** (verified against `codex resume --help`, 0.160.0): `codex resume <SESSION_ID>`
+accepts `--enable`, `-m/--model`, `-c/--config`, and `-a/--ask-for-approval`, so the
+callback returns `["codex", "--no-daemon", "resume", <id>, "--enable",
+"default_mode_request_user_input", ...model/reasoning/permission flags]` and never
+replays the original slash command or prompt. Keep `--enable
+default_mode_request_user_input`: without it a resumed session does not offer
+`request_user_input` in Default mode.
+
+**Permission-mode caveat (found while verifying resume):** Codex 0.160's
+`--ask-for-approval` accepts only `on-request` and `never` — `codex -a untrusted
+--version` errors — so the `untrusted` permission-mode entry's launch flag is invalid
+on this version. The resume callback replays the same builder, so neither path
+introduces a new limitation; fixing the mode is separate work.
 
 ## Assistant message streaming
 
