@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.4.0](https://github.com/pragma-sh/pragma/compare/pragma-cli-v1.3.1...pragma-cli-v1.4.0) (2026-10-28)
+
+
+### Features
+
+* **agents:** restore interrupted agent sessions ([af35a59](https://github.com/pragma-sh/pragma/commit/af35a59337f956ad308ade261028bea6bf6884fa))
+* **agents:** restore interrupted agent sessions ([6daf5c6](https://github.com/pragma-sh/pragma/commit/6daf5c62f4edcb5e3f3d81173cf745b0fa7316ed))
+
+
+### Bug Fixes
+
+* **agent-resume:** preserve retryable failures ([4b1d8cd](https://github.com/pragma-sh/pragma/commit/4b1d8cd7f4faab63719736172eb1192835a8997d))
+* **cli:** detect child signals across platforms ([101e56c](https://github.com/pragma-sh/pragma/commit/101e56c7af8d8e5c38c0ed5553f2c1d573cc6ab9))
+* **cli:** make supervisor tests portable ([db93725](https://github.com/pragma-sh/pragma/commit/db93725940fa7ab2a31498b3863de0827cf8de61))
+
 ## [1.3.1](https://github.com/pragma-sh/pragma/compare/pragma-cli-v1.3.0...pragma-cli-v1.3.1) (2026-10-17)
 
 
